@@ -1,7 +1,7 @@
 import json
 import websocket
 
-from codex_session_delete.cdp import BRIDGE_BINDING_NAME, _bridge_loop, build_bridge_script, pick_page_target
+from codex_session_delete.cdp import BRIDGE_BINDING_NAME, _bridge_loop, build_bridge_script, list_targets, pick_page_target
 
 
 class TimeoutThenMessageSocket:
@@ -31,6 +31,36 @@ def test_pick_page_target_prefers_codex_title():
     ]
 
     assert pick_page_target(targets)["webSocketDebuggerUrl"] == "ws://page"
+
+
+def test_list_targets_bypasses_proxy_environment(monkeypatch):
+    seen = {}
+
+    class FakeResponse:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return [{"type": "page"}]
+
+    class FakeSession:
+        def __init__(self):
+            self.trust_env = True
+
+        def get(self, url, timeout):
+            seen["trust_env"] = self.trust_env
+            seen["url"] = url
+            seen["timeout"] = timeout
+            return FakeResponse()
+
+    monkeypatch.setattr("codex_session_delete.cdp.requests.Session", FakeSession)
+
+    assert list_targets(9229) == [{"type": "page"}]
+    assert seen == {
+        "trust_env": False,
+        "url": "http://127.0.0.1:9229/json",
+        "timeout": 3,
+    }
 
 
 def test_pick_page_target_rejects_missing_websocket():

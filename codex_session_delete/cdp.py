@@ -14,7 +14,9 @@ BRIDGE_BINDING_NAME = "codexSessionDeleteV2"
 
 
 def list_targets(port: int) -> list[dict[str, object]]:
-    response = requests.get(f"http://127.0.0.1:{port}/json", timeout=3)
+    session = requests.Session()
+    session.trust_env = False
+    response = session.get(f"http://127.0.0.1:{port}/json", timeout=3)
     response.raise_for_status()
     return response.json()
 

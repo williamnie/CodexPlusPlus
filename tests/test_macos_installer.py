@@ -4,6 +4,7 @@ import stat
 
 from codex_session_delete.installers import InstallOptions
 from codex_session_delete import __version__
+from codex_session_delete import macos_installer
 from codex_session_delete.macos_installer import install_macos_app, uninstall_macos_app
 
 
@@ -41,3 +42,18 @@ def test_uninstall_macos_app_removes_app_bundle(tmp_path):
     uninstall_macos_app(InstallOptions(install_root=tmp_path))
 
     assert not (tmp_path / "Codex++.app").exists()
+
+
+def test_default_launcher_command_sets_pythonpath_in_source_tree(monkeypatch, tmp_path):
+    package_dir = tmp_path / "codex_session_delete"
+    package_dir.mkdir()
+    (tmp_path / "pyproject.toml").write_text("[project]\nname='codex-session-delete'\n", encoding="utf-8")
+    fake_file = package_dir / "macos_installer.py"
+    fake_file.write_text("", encoding="utf-8")
+    monkeypatch.setattr(macos_installer, "__file__", str(fake_file))
+
+    command = macos_installer._launcher_command(InstallOptions())
+
+    assert "PYTHONPATH=" in command
+    assert str(tmp_path) in command
+    assert "-m codex_session_delete launch" in command

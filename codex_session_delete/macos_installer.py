@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import plistlib
+import shlex
 import shutil
 import stat
 import sys
@@ -24,6 +25,9 @@ EXECUTABLE_NAME = "CodexPlusPlus"
 def _launcher_command(options: "InstallOptions") -> str:
     if options.launcher_command:
         return options.launcher_command
+    project_root = Path(__file__).resolve().parent.parent
+    if (project_root / "pyproject.toml").is_file():
+        return f"env PYTHONPATH={shlex.quote(str(project_root))} {shlex.quote(sys.executable)} -m codex_session_delete launch"
     return f"{sys.executable} -m codex_session_delete launch"
 
 
