@@ -12,6 +12,11 @@ class FakeServer:
     def __init__(self):
         self.shutdown_called = False
         self.server_close_called = False
+        self.bridge_socket = None
+        self.cdp_websocket_url = None
+
+    def inject_automation(self):
+        return True
 
     def shutdown(self):
         self.shutdown_called = True

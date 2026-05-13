@@ -1,8 +1,12 @@
 from __future__ import annotations
 
 import json
+import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from typing import Protocol
+
+import websocket
 
 from codex_session_delete.models import DeleteResult, DeleteStatus, ExportResult, ExportStatus, SessionRef
 
@@ -35,11 +39,69 @@ class HelperServer(ThreadingHTTPServer):
         self.export_service = export_service
         self.allow_http_mutation = allow_http_mutation
         self.http_mutation_token = http_mutation_token
+        self.cdp_websocket_url: str | None = None
+        self._cdp_lock = threading.Lock()
+        self._cdp_msg_id = 1000
+        self._msg_seq = 0
+        self._msg_seq_lock = threading.Lock()
+        self.pending_messages: list[dict[str, str]] = []
+        self.results: dict[str, dict[str, str]] = {}
         super().__init__((host, port), _Handler)
 
     @property
     def port(self) -> int:
         return int(self.server_address[1])
+
+    def _next_cdp_id(self) -> int:
+        with self._cdp_lock:
+            self._cdp_msg_id += 1
+            return self._cdp_msg_id
+
+    def cdp_evaluate(self, script: str, timeout: int = 5) -> object | None:
+        if not self.cdp_websocket_url:
+            return None
+        with self._cdp_lock:
+            ws = websocket.create_connection(self.cdp_websocket_url, timeout=timeout)
+            try:
+                msg_id = self._next_cdp_id()
+                ws.send(json.dumps({
+                    "id": msg_id,
+                    "method": "Runtime.evaluate",
+                    "params": {"expression": script, "awaitPromise": False, "returnByValue": True, "allowUnsafeEvalBlockedByCSP": True},
+                }))
+                while True:
+                    message = json.loads(ws.recv())
+                    if message.get("id") == msg_id:
+                        if "error" in message:
+                            return None
+                        return (message.get("result") or {}).get("result", {}).get("value")
+            finally:
+                ws.close()
+
+    def send_message(self, prompt: str) -> str:
+        with self._msg_seq_lock:
+            self._msg_seq += 1
+            msg_id = str(self._msg_seq)
+        self.pending_messages.append({"id": msg_id, "prompt": prompt})
+        return msg_id
+
+    def get_result(self, msg_id: str) -> dict[str, str] | None:
+        return self.results.get(msg_id)
+
+    def store_result(self, msg_id: str, status: str, content: str) -> None:
+        self.results[msg_id] = {"status": status, "content": content}
+
+    def inject_automation(self) -> bool:
+        if not self.cdp_websocket_url:
+            return False
+        script_path = Path(__file__).parent / "inject" / "conversation-automation.js"
+        if not script_path.exists():
+            return False
+        helper_url = f"http://127.0.0.1:{self.port}"
+        prefix = f"window.__CODEX_SESSION_DELETE_HELPER__ = '{helper_url}';\n"
+        script = prefix + script_path.read_text(encoding="utf-8")
+        self.cdp_evaluate(script)
+        return True
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -52,6 +114,20 @@ class _Handler(BaseHTTPRequestHandler):
         if self.path == "/health":
             self._send_json({"ok": True})
             return
+        if self.path == "/api/pending":
+            msgs = list(self.server.pending_messages)
+            self.server.pending_messages.clear()
+            self._send_json({"messages": msgs})
+            return
+        if self.path.startswith("/api/result/"):
+            msg_id = self.path[len("/api/result/"):]
+            result = self.server.get_result(msg_id)
+            if result:
+                self._send_json(result)
+            else:
+                pending = any(m["id"] == msg_id for m in self.server.pending_messages)
+                self._send_json({"status": "pending" if pending else "not_found", "content": ""})
+            return
         self._send_json({"error": "not found"}, status=404)
 
     def do_POST(self) -> None:
@@ -59,6 +135,21 @@ class _Handler(BaseHTTPRequestHandler):
             payload = self._read_json()
             if self.path in {"/delete", "/undo", "/archived-thread", "/export-markdown"} and not self._is_mutation_authorized():
                 self._send_json({"error": "forbidden"}, status=403)
+                return
+            if self.path == "/api/send":
+                prompt = str(payload.get("prompt", ""))
+                if not prompt.strip():
+                    self._send_json({"error": "empty prompt"}, status=400)
+                    return
+                msg_id = self.server.send_message(prompt)
+                self._send_json({"ok": True, "id": msg_id})
+                return
+            if self.path == "/api/callback":
+                msg_id = str(payload.get("id", ""))
+                status = str(payload.get("status", "success"))
+                content = str(payload.get("content", ""))
+                self.server.store_result(msg_id, status, content)
+                self._send_json({"ok": True})
                 return
             if self.path == "/delete":
                 session = SessionRef(session_id=str(payload.get("session_id", "")), title=str(payload.get("title", "")))

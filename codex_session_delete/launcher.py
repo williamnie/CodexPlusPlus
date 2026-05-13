@@ -339,7 +339,10 @@ def launch_and_inject(app_dir: Path | None, db_path: Path | None, backup_dir: Pa
     codex_proc = None
     try:
         codex_proc = launch_codex_app(resolved_app_dir, debug_port)
-        server.bridge_socket = inject_with_retry(debug_port, script_path, server.port, service, export_service, runtime)
+        injection = inject_with_retry(debug_port, script_path, server.port, service, export_service, runtime)
+        server.bridge_socket = injection
+        server.cdp_websocket_url = runtime.websocket_url
+        server.inject_automation()
         return server, codex_proc
     except Exception:
         shutdown_helper(server)
