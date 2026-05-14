@@ -265,8 +265,127 @@ def test_remote_client_auto_follow_sets_web_active_thread_for_dom_updates():
     end = text.index("\n\n  // --- Message rendering ---", start)
     handle_dom_state = text[start:end]
 
-    assert "state.web_active_thread && state.web_active_thread === currentThreadId" in handle_dom_state
-    assert "navigateToThread(state.active_thread_id, { auto: true, preserveMessages: true })" in handle_dom_state
+    assert "state.web_active_thread && sameThreadId(state.web_active_thread, currentThreadId)" in handle_dom_state
+    assert "navigateToThread(stateThreadId, {" in handle_dom_state
+    assert "preserveMessages: true" in handle_dom_state
+    assert "fromDomState: true" in handle_dom_state
+
+
+def test_remote_client_holds_web_navigation_while_dom_state_catches_up():
+    text = Path("codex_session_delete/static/app.js").read_text(encoding="utf-8")
+    start = text.index("async function navigateToThread")
+    end = text.index("\n\n  function updateCurrentThreadHeader", start)
+    navigate_code = text[start:end]
+    handle_start = text.index("function handleDomState")
+    handle_end = text.index("\n\n  // --- Message rendering ---", handle_start)
+    handle_dom_state = text[handle_start:handle_end]
+
+    assert "let webNavigationHold = null" in text
+    assert "WEB_NAVIGATION_HOLD_MS" in text
+    assert "rememberWebNavigationHold(threadId)" in navigate_code
+    assert "isHoldingCurrentWebThread()" in handle_dom_state
+
+
+def test_remote_client_sends_current_thread_to_desktop_automation():
+    text = Path("codex_session_delete/static/app.js").read_text(encoding="utf-8")
+    start = text.index("async function sendMessage")
+    end = text.index("\n\n  function appendMessage", start)
+    send_code = text[start:end]
+
+    assert "if (currentThreadId) body.thread_id = currentThreadId" in send_code
+    assert 'fetch("/api/remote/send"' in send_code
+
+
+def test_conversation_automation_navigates_target_thread_before_sending():
+    text = Path("codex_session_delete/inject/conversation-automation.js").read_text(encoding="utf-8")
+
+    assert "async function navigateToThreadById(threadId)" in text
+    assert 'msg.action === "navigate_thread"' in text
+    assert "await navigateToThreadById(msg.thread_id)" in text
+    assert 'await sendMessage(msg.prompt, msg.id, msg.thread_id || "")' in text
+    assert text.index("function getActiveThreadId") < text.index("async function navigateToThreadById")
+
+
+def test_conversation_automation_blocks_targeted_send_when_navigation_fails():
+    text = Path("codex_session_delete/inject/conversation-automation.js").read_text(encoding="utf-8")
+    start = text.index("async function sendMessage")
+    end = text.index("\n\n  async function injectPromptIntoTextarea", start)
+    send_code = text[start:end]
+    nav_start = text.index("async function navigateToThreadById")
+    nav_end = text.index("\n\n  async function submitPrompt", nav_start)
+    nav_code = text[nav_start:nav_end]
+
+    assert "threadId && !(await navigateToThreadById(threadId))" in send_code
+    assert "Cannot switch to target thread" in send_code
+    assert "if (!threadId)" in send_code
+    assert "findNewChatButton()" in send_code
+    assert "|| findTextarea()" not in nav_code
+
+
+def test_conversation_automation_matches_local_prefixed_thread_ids():
+    text = Path("codex_session_delete/inject/conversation-automation.js").read_text(encoding="utf-8")
+    find_start = text.index("function findThreadLinkById")
+    find_end = text.index("\n\n  async function navigateToThreadById", find_start)
+    find_code = text[find_start:find_end]
+    nav_start = text.index("async function navigateToThreadById")
+    nav_end = text.index("\n\n  async function submitPrompt", nav_start)
+    nav_code = text[nav_start:nav_end]
+
+    assert "function threadIdVariants(threadId)" in text
+    assert 'variants.add("local:" + id)' in text
+    assert "function sameThreadId(left, right)" in text
+    assert "for (const variant of threadIdVariants(threadId))" in find_code
+    assert "sameThreadId(getActiveThreadId(), threadId)" in nav_code
+
+
+def test_conversation_automation_uses_pointer_sequence_for_thread_navigation():
+    text = Path("codex_session_delete/inject/conversation-automation.js").read_text(encoding="utf-8")
+    nav_start = text.index("async function navigateToThreadById")
+    nav_end = text.index("\n\n  async function submitPrompt", nav_start)
+    nav_code = text[nav_start:nav_end]
+
+    assert "function activateThreadRow(row)" in text
+    assert "row.scrollIntoView" in text
+    assert 'new PointerEvent("pointerdown"' in text
+    assert 'new MouseEvent("mousedown"' in text
+    assert 'new PointerEvent("pointerup"' in text
+    assert 'new MouseEvent("mouseup"' in text
+    assert 'new MouseEvent("click"' in text
+    assert "activateThreadRow(link)" in nav_code
+    assert "link.click()" not in nav_code
+
+
+def test_remote_dom_report_merges_local_prefixed_desktop_thread(tmp_path):
+    service = FakeDeleteService()
+    server = HelperServer("127.0.0.1", 0, service)
+    server.dom_state_store.update({"web_active_thread": "t1"})
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        result = post_json(
+            f"http://127.0.0.1:{server.port}/api/dom-report",
+            {"active_thread_id": "local:t1", "messages": [{"role": "user", "content": "hi"}], "is_streaming": False},
+        )
+    finally:
+        server.shutdown()
+        thread.join(timeout=3)
+
+    assert result == {"ok": True}
+    snapshot = server.dom_state_store.snapshot()
+    assert snapshot["messages"] == [{"role": "user", "content": "hi"}]
+    assert snapshot["is_streaming"] is False
+
+
+def test_remote_client_normalizes_local_prefixed_dom_thread_ids():
+    text = Path("codex_session_delete/static/app.js").read_text(encoding="utf-8")
+    handle_start = text.index("function handleDomState")
+    handle_end = text.index("\n\n  function maybeNotifyTaskCompleted", handle_start)
+    handle_code = text[handle_start:handle_end]
+
+    assert "function normalizeThreadId(threadId)" in text
+    assert "function sameThreadId(left, right)" in text
+    assert "canonicalThreadId(state.active_thread_id)" in handle_code
+    assert "!sameThreadId(stateThreadId, currentThreadId)" in handle_code
 
 
 def test_remote_client_scrolls_to_bottom_after_layout_settles():
@@ -481,6 +600,50 @@ def test_remote_threads_route_prefers_session_index_title_over_db_first_prompt(t
 
     entry = data["projects"]["project-a"][0]
     assert entry["title"] == "修复远程线程标题"
+
+
+def test_remote_navigate_route_queues_desktop_navigation_action(tmp_path):
+    db_path = tmp_path / "state.sqlite"
+    rollout_path = tmp_path / "rollout.jsonl"
+    rollout_path.write_text("", encoding="utf-8")
+    with sqlite3.connect(db_path) as db:
+        db.execute("CREATE TABLE threads (id TEXT PRIMARY KEY, rollout_path TEXT)")
+        db.execute("INSERT INTO threads VALUES (?, ?)", ("t1", str(rollout_path)))
+
+    service = FakeDeleteService()
+    server = HelperServer("127.0.0.1", 0, service)
+    server.web_token = "test-token"
+    server.db_path = db_path
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        result = post_json(f"http://127.0.0.1:{server.port}/api/remote/navigate?token=test-token", {"thread_id": "t1"})
+    finally:
+        server.shutdown()
+        thread.join(timeout=3)
+
+    assert result["status"] == "ok"
+    assert server.pending_messages == [{"id": "1", "action": "navigate_thread", "thread_id": "t1"}]
+    assert server.dom_state_store.snapshot()["web_active_thread"] == "t1"
+
+
+def test_remote_send_route_includes_target_thread_for_desktop_automation():
+    service = FakeDeleteService()
+    server = HelperServer("127.0.0.1", 0, service)
+    server.web_token = "test-token"
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        sent = post_json(
+            f"http://127.0.0.1:{server.port}/api/remote/send?token=test-token",
+            {"prompt": "hello", "thread_id": "t1"},
+        )
+    finally:
+        server.shutdown()
+        thread.join(timeout=3)
+
+    assert sent == {"ok": True, "id": "1"}
+    assert server.pending_messages == [{"id": "1", "prompt": "hello", "thread_id": "t1"}]
 
 
 def test_remote_post_route_accepts_token_query_string():

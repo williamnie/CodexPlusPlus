@@ -89,6 +89,7 @@
   let lastThreadListJson = "";
   let lastThreadListData = { projects: {}, ungrouped: [] };
   let pendingNewChat = null;
+  let webNavigationHold = null;
   let threadPollTimer = null;
   let soundReminderEnabled = localStorage.getItem("codexRemoteSoundEnabled") === "1";
   let audioPermissionPromptEl = null;
@@ -103,6 +104,7 @@
   const COMPLETION_TOAST_MS = 5000;
   const COMPLETION_SOUND_GAIN = 0.08;
   const COMPLETION_SOUND_DURATION = 0.16;
+  const WEB_NAVIGATION_HOLD_MS = 5000;
 
   // --- DOM refs ---
   const threadListEl = document.getElementById("threadList");
@@ -446,6 +448,21 @@
     return Math.floor(diff / 604800000) + "w";
   }
 
+  function normalizeThreadId(threadId) {
+    return String(threadId || "").trim().replace(/^local:/, "");
+  }
+
+  function canonicalThreadId(threadId) {
+    const normalized = normalizeThreadId(threadId);
+    return normalized || String(threadId || "").trim();
+  }
+
+  function sameThreadId(left, right) {
+    const leftId = normalizeThreadId(left);
+    const rightId = normalizeThreadId(right);
+    return !!leftId && !!rightId && leftId === rightId;
+  }
+
   // --- Search ---
   searchInput.addEventListener("input", function () {
     const q = searchInput.value.toLowerCase();
@@ -459,6 +476,7 @@
     options = options || {};
     if (!options.auto) pendingNewChat = null;
     currentThreadId = threadId;
+    if (!options.fromDomState) rememberWebNavigationHold(threadId);
     highlightThread(threadId);
     closeSidebar();
 
@@ -568,23 +586,28 @@
   function handleDomState(state) {
     const previousStreaming = lastRemoteStreaming;
     const previousThreadId = lastStreamingThreadId;
+    const stateThreadId = state.active_thread_id ? canonicalThreadId(state.active_thread_id) : "";
 
     // 桌面端切换了线程，但 Web 用户正在查看特定线程时不跟随
-    if (state.active_thread_id && state.active_thread_id !== currentThreadId) {
-      if (state.web_active_thread && state.web_active_thread === currentThreadId) {
+    if (stateThreadId && !sameThreadId(stateThreadId, currentThreadId)) {
+      if (state.web_active_thread && sameThreadId(state.web_active_thread, currentThreadId)) {
         // Web 用户正在查看特定线程，不跟随桌面端
+      } else if (isHoldingCurrentWebThread()) {
+        // Web 刚主动切换线程，等待 /navigate 更新 dom-state，避免被旧桌面状态切回。
       } else {
-        navigateToThread(state.active_thread_id, { auto: true, preserveMessages: true });
+        navigateToThread(stateThreadId, { auto: true, preserveMessages: true, fromDomState: true });
       }
+    } else if (stateThreadId && sameThreadId(stateThreadId, currentThreadId)) {
+      clearWebNavigationHold(currentThreadId);
     }
 
     if (state.messages && state.messages.length > 0) {
       renderMessages(state.messages, state.is_streaming);
     }
 
-    maybeNotifyTaskCompleted(state, previousStreaming, previousThreadId);
+    maybeNotifyTaskCompleted({ ...state, active_thread_id: stateThreadId || state.active_thread_id }, previousStreaming, previousThreadId);
     lastRemoteStreaming = !!state.is_streaming;
-    if (state.active_thread_id) lastStreamingThreadId = state.active_thread_id;
+    if (stateThreadId) lastStreamingThreadId = stateThreadId;
     remoteStateSeen = true;
   }
 
@@ -600,6 +623,23 @@
     showRemoteToast("任务已完成", preview);
     playCompletionSound();
     showCompletionNotification(preview);
+  }
+
+  function rememberWebNavigationHold(threadId) {
+    webNavigationHold = { threadId: threadId, until: Date.now() + WEB_NAVIGATION_HOLD_MS };
+  }
+
+  function clearWebNavigationHold(threadId) {
+    if (webNavigationHold && webNavigationHold.threadId === threadId) {
+      webNavigationHold = null;
+    }
+  }
+
+  function isHoldingCurrentWebThread() {
+    if (!webNavigationHold || webNavigationHold.threadId !== currentThreadId) return false;
+    if (Date.now() <= webNavigationHold.until) return true;
+    webNavigationHold = null;
+    return false;
   }
 
   function lastAssistantMessage(messages) {
@@ -714,6 +754,7 @@
 
     try {
       var body = { prompt: prompt };
+      if (currentThreadId) body.thread_id = currentThreadId;
       var r = await fetch("/api/remote/send", {
         method: "POST",
         headers: authHeaders(),
