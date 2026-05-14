@@ -55,6 +55,28 @@
     return !!leftPath && !!rightPath && leftPath === rightPath;
   }
 
+  function normalizeThreadId(threadId) {
+    return String(threadId || "").trim().replace(/^local:/, "");
+  }
+
+  function threadIdVariants(threadId) {
+    const variants = new Set();
+    const raw = String(threadId || "").trim();
+    const id = normalizeThreadId(raw);
+    if (raw) variants.add(raw);
+    if (id) {
+      variants.add(id);
+      variants.add("local:" + id);
+    }
+    return Array.from(variants);
+  }
+
+  function sameThreadId(left, right) {
+    const leftId = normalizeThreadId(left);
+    const rightId = normalizeThreadId(right);
+    return !!leftId && !!rightId && leftId === rightId;
+  }
+
   function findProjectNewChatButton(cwd) {
     if (!cwd) return null;
     const rows = Array.from(document.querySelectorAll("[data-app-action-sidebar-project-row]"));
@@ -73,6 +95,22 @@
         return /开始新对话|新对话|new chat|start/i.test(label);
       });
       if (candidates.length > 0) return candidates[candidates.length - 1];
+    }
+    return null;
+  }
+
+  function getActiveThreadId() {
+    const urlMatch = window.location.href.match(/thread[=/:]([A-Za-z0-9_.-]+)/i);
+    if (urlMatch) return urlMatch[1];
+    const rows = document.querySelectorAll('[data-app-action-sidebar-thread-id]');
+    for (const r of rows) {
+      if (r.getAttribute("aria-current") === "page" || r.getAttribute("aria-current") === "true") {
+        return r.getAttribute("data-app-action-sidebar-thread-id");
+      }
+      const href = r.getAttribute("href") || "";
+      if (href && window.location.href.includes(href)) {
+        return r.getAttribute("data-app-action-sidebar-thread-id");
+      }
     }
     return null;
   }
@@ -137,22 +175,29 @@
     }
   }
 
-  async function sendMessage(prompt, msgId) {
+  async function sendMessage(prompt, msgId, threadId) {
     try {
+      if (threadId && !(await navigateToThreadById(threadId))) {
+        reportResult(msgId, "error", "Cannot switch to target thread");
+        return;
+      }
       let textarea = findTextarea();
       if (!textarea) {
-        // No textarea found - try clicking new chat first
-        const btn = findNewChatButton();
-        if (btn) {
-          btn.click();
-          await new Promise(r => setTimeout(r, 800));
-          try {
-            textarea = await waitForElement("textarea, div[contenteditable='true']", 10000);
-          } catch (e) {
-            reportResult(msgId, "error", "Cannot find textarea after creating new chat");
-            return;
+        if (!threadId) {
+          // No textarea found for an untargeted send - preserve the legacy new-chat fallback.
+          const btn = findNewChatButton();
+          if (btn) {
+            btn.click();
+            await new Promise(r => setTimeout(r, 800));
+            try {
+              textarea = await waitForElement("textarea, div[contenteditable='true']", 10000);
+            } catch (e) {
+              reportResult(msgId, "error", "Cannot find textarea after creating new chat");
+              return;
+            }
           }
-        } else {
+        }
+        if (!textarea) {
           reportResult(msgId, "error", "Cannot find textarea or new chat button");
           return;
         }
@@ -257,6 +302,49 @@
       cancelable: true,
     }));
     return true;
+  }
+
+  function findThreadLinkById(threadId) {
+    if (!threadId) return null;
+    for (const variant of threadIdVariants(threadId)) {
+      const escaped = typeof CSS !== "undefined" && CSS.escape ? CSS.escape(variant) : variant.replace(/"/g, '\"');
+      const direct = document.querySelector(`[data-app-action-sidebar-thread-id="${escaped}"]`);
+      if (direct && direct.offsetParent !== null) return direct;
+    }
+    const links = Array.from(document.querySelectorAll("a[href], button[data-href]"));
+    const variants = threadIdVariants(threadId);
+    for (const link of links) {
+      if (link.offsetParent === null) continue;
+      const href = link.getAttribute("href") || link.getAttribute("data-href") || "";
+      if (variants.some((variant) => href.includes(variant))) return link;
+    }
+    return null;
+  }
+
+  function activateThreadRow(row) {
+    if (!row) return;
+    row.scrollIntoView({ block: "center" });
+    if (typeof PointerEvent !== "undefined") {
+      row.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, cancelable: true, pointerId: 1, pointerType: "mouse", isPrimary: true, buttons: 1 }));
+    }
+    row.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true, buttons: 1 }));
+    if (typeof PointerEvent !== "undefined") {
+      row.dispatchEvent(new PointerEvent("pointerup", { bubbles: true, cancelable: true, pointerId: 1, pointerType: "mouse", isPrimary: true }));
+    }
+    row.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, cancelable: true }));
+    row.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+  }
+
+  async function navigateToThreadById(threadId) {
+    if (!threadId || sameThreadId(getActiveThreadId(), threadId)) return true;
+    const link = findThreadLinkById(threadId);
+    if (!link) return false;
+    activateThreadRow(link);
+    for (let attempt = 0; attempt < 30; attempt++) {
+      await new Promise(r => setTimeout(r, 150));
+      if (sameThreadId(getActiveThreadId(), threadId)) return true;
+    }
+    return sameThreadId(getActiveThreadId(), threadId);
   }
 
   async function submitPrompt() {
@@ -396,8 +484,11 @@
           resultCallbacks[msg.id] = () => {};
           if (msg.action === "new_chat") {
             await handleNewChat(msg.id, msg.cwd || "", msg.prompt || "");
+          } else if (msg.action === "navigate_thread") {
+            await navigateToThreadById(msg.thread_id);
+            reportResult(msg.id, "success", "Thread navigation requested");
           } else {
-            await sendMessage(msg.prompt, msg.id);
+            await sendMessage(msg.prompt, msg.id, msg.thread_id || "");
           }
         }
       }
@@ -410,22 +501,6 @@
   (function installDomReporter() {
     const REPORT_INTERVAL = 800;
     let lastHash = "";
-
-    function getActiveThreadId() {
-      const urlMatch = window.location.href.match(/thread[=/:]([A-Za-z0-9_.-]+)/i);
-      if (urlMatch) return urlMatch[1];
-      const rows = document.querySelectorAll('[data-app-action-sidebar-thread-id]');
-      for (const r of rows) {
-        if (r.getAttribute("aria-current") === "page" || r.getAttribute("aria-current") === "true") {
-          return r.getAttribute("data-app-action-sidebar-thread-id");
-        }
-        const href = r.getAttribute("href") || "";
-        if (href && window.location.href.includes(href)) {
-          return r.getAttribute("data-app-action-sidebar-thread-id");
-        }
-      }
-      return null;
-    }
 
     function extractMessages() {
       const messages = [];

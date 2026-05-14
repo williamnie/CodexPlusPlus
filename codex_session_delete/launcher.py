@@ -26,6 +26,17 @@ from codex_session_delete.storage_adapter import SQLiteStorageAdapter
 from codex_session_delete.user_scripts import UserScriptManager
 
 
+
+def _normalize_thread_id(thread_id: object) -> str:
+    return str(thread_id or "").strip().removeprefix("local:")
+
+
+def _same_thread_id(left: object, right: object) -> bool:
+    left_id = _normalize_thread_id(left)
+    right_id = _normalize_thread_id(right)
+    return bool(left_id and right_id and left_id == right_id)
+
+
 class ApiFirstDeleteService:
     def __init__(self, api_adapter: ApiAdapter, db_path: Path | None, backup_dir: Path):
         self.api_adapter = api_adapter
@@ -114,7 +125,7 @@ class CodexPlusRuntime:
             return {"ok": False, "error": "helper_unavailable"}
         web_thread = self.helper_server.dom_state_store._state.get("web_active_thread")
         desktop_thread = str(payload.get("active_thread_id") or "")
-        if web_thread and desktop_thread and web_thread == desktop_thread:
+        if _same_thread_id(web_thread, desktop_thread):
             self.helper_server.dom_state_store.update(payload)
         else:
             filtered = {

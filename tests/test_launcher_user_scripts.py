@@ -167,6 +167,30 @@ def test_handle_bridge_request_accepts_dom_report_without_network_fetch(tmp_path
     assert updates == [{"active_thread_id": "t1", "messages": [{"role": "user", "content": "hi"}], "is_streaming": False}]
 
 
+def test_handle_bridge_request_merges_local_prefixed_dom_report(tmp_path):
+    manager = UserScriptManager(tmp_path / "builtin", tmp_path / "user", tmp_path / "config.json")
+    updates = []
+
+    class Store:
+        _state = {"web_active_thread": "t1"}
+
+        def update(self, payload):
+            updates.append(payload)
+
+    runtime = CodexPlusRuntime(None, manager, helper_server=type("Server", (), {"dom_state_store": Store()})())
+
+    result = handle_bridge_request(
+        FakeDeleteService(),
+        FakeExportService(),
+        "/api/dom-report",
+        {"active_thread_id": "local:t1", "messages": [{"role": "user", "content": "hi"}], "is_streaming": False},
+        runtime,
+    )
+
+    assert result == {"ok": True}
+    assert updates == [{"active_thread_id": "local:t1", "messages": [{"role": "user", "content": "hi"}], "is_streaming": False}]
+
+
 def test_handle_bridge_request_exports_markdown(tmp_path):
     manager = UserScriptManager(tmp_path / "builtin", tmp_path / "user", tmp_path / "config.json")
     runtime = FakeRuntime(manager)
