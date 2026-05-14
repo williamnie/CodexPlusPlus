@@ -12,7 +12,7 @@ from typing import Protocol
 import websocket
 
 from codex_session_delete.models import DeleteResult, DeleteStatus, ExportResult, ExportStatus, SessionRef
-from codex_session_delete.remote_web import DomStateStore, handle_sse, serve_remote_index, serve_static_file, validate_token
+from codex_session_delete.remote_web import DomStateStore, RolloutWatcher, _load_messages_from_rollout, handle_sse, serve_remote_index, serve_static_file, validate_token
 
 
 class DeleteService(Protocol):
@@ -53,6 +53,7 @@ class HelperServer(ThreadingHTTPServer):
         self.web_token: str | None = None
         self.db_path: Path | None = None
         self.dom_state_store = DomStateStore()
+        self.rollout_watcher = RolloutWatcher(self.dom_state_store)
         super().__init__((host, port), _Handler)
 
     @property
@@ -93,6 +94,15 @@ class HelperServer(ThreadingHTTPServer):
         self.pending_messages.append({"id": msg_id, "prompt": prompt})
         return msg_id
 
+    def queue_action(self, action: str, **kwargs: object) -> str:
+        with self._msg_seq_lock:
+            self._msg_seq += 1
+            msg_id = str(self._msg_seq)
+        entry: dict[str, object] = {"id": msg_id, "action": action}
+        entry.update(kwargs)
+        self.pending_messages.append(entry)
+        return msg_id
+
     def get_result(self, msg_id: str) -> dict[str, str] | None:
         return self.results.get(msg_id)
 
@@ -106,7 +116,12 @@ class HelperServer(ThreadingHTTPServer):
         if not script_path.exists():
             return False
         helper_url = f"http://127.0.0.1:{self.port}"
-        prefix = f"window.__CODEX_SESSION_DELETE_HELPER__ = '{helper_url}';\n"
+        # Clear the guard flag so re-injection works. Conversation automation uses
+        # the CDP binding bridge for helper calls so Codex's CSP does not block it.
+        prefix = (
+            f"window.__CODEX_SESSION_DELETE_HELPER__ = '{helper_url}';\n"
+            "window.__codexConversationAutomation = false;\n"
+        )
         script = prefix + script_path.read_text(encoding="utf-8")
         self.cdp_evaluate(script)
         return True
@@ -153,11 +168,23 @@ class _Handler(BaseHTTPRequestHandler):
                 return
             self._send_json({"error": "not found"}, status=404)
             return
+        if path.startswith("/api/remote/result/"):
+            if not self._check_web_token():
+                self._send_json({"error": "unauthorized"}, status=401)
+                return
+            msg_id = path[len("/api/remote/result/"):]
+            result = self.server.get_result(msg_id)
+            if result:
+                self._send_json(result)
+            else:
+                pending = any(str(m.get("id")) == msg_id for m in self.server.pending_messages)
+                self._send_json({"status": "pending" if pending else "not_found", "content": ""})
+            return
         if path.startswith("/api/remote/dom-state"):
             if not self._check_web_token():
                 self._send_json({"error": "unauthorized"}, status=401)
                 return
-            handle_sse(self, self.server.dom_state_store, self.server.web_token or "")
+            handle_sse(self, self.server.dom_state_store, self.server.web_token or "", self.server.db_path)
             return
         if path == "/api/remote/dom-snapshot":
             if not self._check_web_token():
@@ -239,7 +266,16 @@ class _Handler(BaseHTTPRequestHandler):
                 if self.client_address[0] not in ("127.0.0.1", "::1"):
                     self._send_json({"error": "forbidden"}, status=403)
                     return
-                self.server.dom_state_store.update(payload)
+                web_thread = self.server.dom_state_store._state.get("web_active_thread")
+                desktop_thread = str(payload.get("active_thread_id") or "")
+                if web_thread and desktop_thread and web_thread == desktop_thread:
+                    # 桌面端和 Web 端查看同一线程，完整合并
+                    self.server.dom_state_store.update(payload)
+                else:
+                    # 不同线程，只合并元数据，不覆盖 Web 端的消息和流式状态
+                    filtered = {k: v for k, v in payload.items()
+                                if k not in ("messages", "is_streaming", "streaming_content")}
+                    self.server.dom_state_store.update(filtered)
                 self._send_json({"ok": True})
                 return
             if path == "/api/remote/navigate":
@@ -247,17 +283,8 @@ class _Handler(BaseHTTPRequestHandler):
                     self._send_json({"error": "unauthorized"}, status=401)
                     return
                 thread_id = str(payload.get("thread_id", ""))
-                script = (
-                    '(() => {'
-                    f'const row = document.querySelector(\'[data-app-action-sidebar-thread-id="{thread_id}"]\');'
-                    'if (!row) return {status: "not_found"};'
-                    'const link = row.querySelector("a") || row;'
-                    'link.click();'
-                    f'return {{status: "ok", thread_id: "{thread_id}"}};'
-                    '})()'
-                )
-                result = self.server.cdp_evaluate(script)
-                self._send_json(result if isinstance(result, dict) else {"status": "cdp_unavailable"})
+                result = self._navigate_thread_from_db(thread_id)
+                self._send_json(result)
                 return
             if path == "/api/remote/send":
                 if not self._check_web_token():
@@ -274,15 +301,17 @@ class _Handler(BaseHTTPRequestHandler):
                 if not self._check_web_token():
                     self._send_json({"error": "unauthorized"}, status=401)
                     return
-                script = (
-                    '(() => {'
-                    'const sels = [\'button[aria-label="New chat"]\',\'button[aria-label="新对话"]\',\'button[aria-label="New Chat"]\'];'
-                    'for (const s of sels) { const b = document.querySelector(s); if (b) { b.click(); return {status: "ok"}; } }'
-                    'return {status: "not_found"};'
-                    '})()'
-                )
-                result = self.server.cdp_evaluate(script)
-                self._send_json(result if isinstance(result, dict) else {"status": "cdp_unavailable"})
+                cwd = str(payload.get("cwd", "")) if payload else ""
+                prompt = str(payload.get("prompt", "")) if payload else ""
+                msg_id = self.server.queue_action("new_chat", cwd=cwd, prompt=prompt)
+                self._send_json({"ok": True, "id": msg_id})
+                return
+            if path == "/api/remote/reinject":
+                if not self._check_web_token():
+                    self._send_json({"error": "unauthorized"}, status=401)
+                    return
+                ok = self.server.inject_automation()
+                self._send_json({"ok": ok})
                 return
             self._send_json({"error": "not found"}, status=404)
         except Exception as exc:
@@ -408,6 +437,46 @@ class _Handler(BaseHTTPRequestHandler):
         except OSError:
             return {}
         return titles
+
+    def _navigate_thread_from_db(self, thread_id: str) -> dict[str, object]:
+        db_path = self.server.db_path
+        if db_path is None or not db_path.exists():
+            return {"status": "not_found", "message": "数据库文件不存在"}
+        try:
+            with sqlite3.connect(str(db_path)) as db:
+                db.row_factory = sqlite3.Row
+                row = db.execute("SELECT id, rollout_path FROM threads WHERE id = ?", (thread_id,)).fetchone()
+                if row is None:
+                    row = db.execute("SELECT id FROM sessions WHERE id = ?", (thread_id,)).fetchone()
+                    if row is None:
+                        return {"status": "not_found"}
+                    self.server.dom_state_store.update({
+                        "active_thread_id": thread_id,
+                        "web_active_thread": thread_id,
+                        "messages": [],
+                        "is_streaming": False,
+                        "streaming_content": "",
+                    })
+                    return {"status": "ok", "thread_id": thread_id, "message_count": 0}
+                rollout_path = str(row["rollout_path"] or "")
+                messages: list[dict[str, str]] = []
+                rp: Path | None = None
+                if rollout_path:
+                    rp = Path(rollout_path)
+                    if rp.is_file():
+                        messages = _load_messages_from_rollout(rp)
+        except (sqlite3.Error, OSError):
+            return {"status": "error", "message": "读取数据库失败"}
+        self.server.dom_state_store.update({
+            "active_thread_id": thread_id,
+            "web_active_thread": thread_id,
+            "messages": messages,
+            "is_streaming": False,
+            "streaming_content": "",
+        })
+        if rp and rp.is_file():
+            self.server.rollout_watcher.watch(thread_id, rp, len(messages))
+        return {"status": "ok", "thread_id": thread_id, "message_count": len(messages)}
 
     def _send_json(self, payload: dict[str, object], status: int = 200) -> None:
         data = json.dumps(payload).encode("utf-8")

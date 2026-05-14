@@ -2,6 +2,34 @@
 (function () {
   "use strict";
 
+  // --- Configure marked.js ---
+  if (typeof marked !== "undefined") {
+    marked.setOptions({
+      breaks: true,
+      gfm: true,
+      highlight: function (code, lang) {
+        if (typeof hljs !== "undefined" && lang && hljs.getLanguage(lang)) {
+          return hljs.highlight(code, { language: lang }).value;
+        }
+        if (typeof hljs !== "undefined") {
+          return hljs.highlightAuto(code).value;
+        }
+        return code;
+      },
+    });
+  }
+
+  function renderMarkdown(text) {
+    if (typeof marked !== "undefined") {
+      try {
+        return marked.parse(text);
+      } catch (e) {
+        return escapeHtml(text);
+      }
+    }
+    return escapeHtml(text).replace(/\n/g, "<br>");
+  }
+
   // --- Auth ---
   function bootstrapToken() {
     const params = new URLSearchParams(window.location.search);
@@ -57,6 +85,9 @@
   let sseAbortController = null;
   let reconnectTimer = null;
   let sseConnected = false;
+  let selectedProject = null; // {label, cwd}
+  let lastThreadListJson = "";
+  let threadPollTimer = null;
 
   // --- DOM refs ---
   const threadListEl = document.getElementById("threadList");
@@ -68,13 +99,25 @@
   const sidebar = document.getElementById("sidebar");
   const overlay = document.getElementById("sidebarOverlay");
   const searchInput = document.getElementById("searchInput");
+  const selectedProjectEl = document.getElementById("selectedProject");
+  const selectedProjectName = document.getElementById("selectedProjectName");
+  const clearProjectBtn = document.getElementById("clearProjectBtn");
 
   // --- Init ---
   function init() {
     loadThreadList();
     connectSSE();
     checkHealth();
+    // Re-inject automation script to ensure it's active
+    fetch("/api/remote/reinject", { method: "POST", headers: authHeaders() }).catch(function () {});
+    if (!threadPollTimer) {
+      threadPollTimer = setInterval(loadThreadList, 1000);
+    }
   }
+
+  window.addEventListener("beforeunload", function () {
+    if (threadPollTimer) { clearInterval(threadPollTimer); threadPollTimer = null; }
+  });
 
   // --- Health check ---
   async function checkHealth() {
@@ -90,6 +133,32 @@
     }
   }
 
+  // --- Project selection ---
+  function selectProject(label, cwd) {
+    selectedProject = { label: label, cwd: cwd };
+    selectedProjectName.textContent = label;
+    selectedProjectEl.style.display = "flex";
+    highlightProjectDot(label);
+  }
+
+  function clearProject() {
+    selectedProject = null;
+    selectedProjectEl.style.display = "none";
+    selectedProjectName.textContent = "";
+    highlightProjectDot(null);
+  }
+
+  function highlightProjectDot(label) {
+    document.querySelectorAll(".project-header").forEach(function (hdr) {
+      var isThis = label && hdr.dataset.projectLabel === label;
+      hdr.classList.toggle("selected", isThis);
+      var dot = hdr.querySelector(".project-select-dot");
+      if (dot) dot.classList.toggle("selected", isThis);
+    });
+  }
+
+  clearProjectBtn.addEventListener("click", clearProject);
+
   // --- Thread list ---
   async function loadThreadList() {
     try {
@@ -99,9 +168,13 @@
         return;
       }
       const data = await r.json();
+      var json = JSON.stringify(data);
+      if (json === lastThreadListJson) return;
+      lastThreadListJson = json;
       renderThreadList(data);
+      if (currentThreadId) highlightThread(currentThreadId);
     } catch (e) {
-      threadListEl.innerHTML = '<div class="empty-state"><p>Failed to load conversations</p></div>';
+      // Silently fail on poll errors to avoid disrupting the UI
     }
   }
 
@@ -121,27 +194,66 @@
     for (const name of projectNames) {
       const threads = projects[name];
       threads.forEach(function (t) { threadMeta[t.id] = t; });
-      const group = createProjectGroup(name, threads);
+      // Get cwd from the first thread that has it
+      var cwd = "";
+      for (var i = 0; i < threads.length; i++) {
+        if (threads[i].cwd) { cwd = threads[i].cwd; break; }
+      }
+      const group = createProjectGroup(name, threads, cwd);
       threadListEl.appendChild(group);
     }
 
     // Ungrouped
     if (ungrouped.length > 0) {
       ungrouped.forEach(function (t) { threadMeta[t.id] = t; });
-      const group = createProjectGroup("Chats", ungrouped);
+      const group = createProjectGroup("Chats", ungrouped, "");
       threadListEl.appendChild(group);
+    }
+
+    // Restore project dot highlight
+    if (selectedProject) {
+      highlightProjectDot(selectedProject.label);
     }
   }
 
-  function createProjectGroup(label, threads) {
+  function createProjectGroup(label, threads, cwd) {
     const frag = document.createElement("div");
 
     const header = document.createElement("div");
     header.className = "project-header";
-    header.innerHTML = '<span class="arrow">&#9660;</span> ' + escapeHtml(label);
-    header.addEventListener("click", function () {
+    header.dataset.projectLabel = label;
+    header.dataset.projectCwd = cwd || "";
+
+    var arrowSpan = '<span class="arrow">&#9660;</span> ';
+    var labelSpan = escapeHtml(label);
+    var dotSpan = cwd ? ' <span class="project-select-dot"></span>' : "";
+    header.innerHTML = arrowSpan + labelSpan + dotSpan;
+
+    header.addEventListener("click", function (e) {
+      // If clicked the dot area, toggle project selection
+      if (e.target.classList.contains("project-select-dot") || (cwd && e.offsetX > header.offsetWidth - 30)) {
+        if (selectedProject && selectedProject.label === label) {
+          clearProject();
+        } else {
+          selectProject(label, cwd);
+        }
+        return;
+      }
       header.classList.toggle("collapsed");
     });
+
+    // Right-click to select project
+    if (cwd) {
+      header.addEventListener("contextmenu", function (e) {
+        e.preventDefault();
+        if (selectedProject && selectedProject.label === label) {
+          clearProject();
+        } else {
+          selectProject(label, cwd);
+        }
+      });
+    }
+
     frag.appendChild(header);
 
     const list = document.createElement("div");
@@ -190,6 +302,12 @@
 
     const meta = threadMeta[threadId];
     chatTitle.textContent = meta ? meta.title || "Untitled" : threadId;
+
+    // Auto-select the project this thread belongs to
+    if (meta && meta.cwd) {
+      var label = meta.cwd.split("/").pop() || meta.cwd;
+      selectProject(label, meta.cwd);
+    }
 
     messageListEl.innerHTML = '<div class="msg-loading">Loading...</div>';
 
@@ -281,12 +399,22 @@
   }
 
   function handleDomState(state) {
-    // Track active thread from desktop
+    // 桌面端切换了线程，但 Web 用户正在查看特定线程时不跟随
     if (state.active_thread_id && state.active_thread_id !== currentThreadId) {
-      currentThreadId = state.active_thread_id;
-      highlightThread(currentThreadId);
-      var meta = threadMeta[currentThreadId];
-      if (meta) chatTitle.textContent = meta.title || "Untitled";
+      if (state.web_active_thread && state.web_active_thread === currentThreadId) {
+        // Web 用户正在查看特定线程，不跟随桌面端
+      } else {
+        currentThreadId = state.active_thread_id;
+        highlightThread(currentThreadId);
+        var meta = threadMeta[currentThreadId];
+        if (meta) {
+          chatTitle.textContent = meta.title || "Untitled";
+          if (meta.cwd) {
+            var label = meta.cwd.split("/").pop() || meta.cwd;
+            selectProject(label, meta.cwd);
+          }
+        }
+      }
     }
 
     if (state.messages && state.messages.length > 0) {
@@ -329,7 +457,13 @@
         el = newEl;
       }
 
-      el.textContent = msg.content;
+      // Render markdown for assistant messages, plain text for user/system
+      if (msg.role === "assistant") {
+        el.innerHTML = '<div class="md-content">' + renderMarkdown(msg.content) + '</div>';
+      } else {
+        el.textContent = msg.content;
+      }
+
       if (msg.role === "assistant" && i === messages.length - 1 && isStreaming) {
         el.classList.add("streaming");
       } else {
@@ -371,16 +505,29 @@
     appendMessage("user", prompt);
 
     try {
+      var body = { prompt: prompt };
       var r = await fetch("/api/remote/send", {
         method: "POST",
         headers: authHeaders(),
-        body: JSON.stringify({ prompt: prompt }),
+        body: JSON.stringify(body),
       });
       var data = await r.json();
       if (!data.ok) {
         appendMessage("system", "Failed to send: " + (data.error || "unknown error"));
+        return;
       }
-      // Response will arrive via SSE
+      // Poll for the response from Codex
+      if (data.id) {
+        pollActionResult(data.id, function (result) {
+          if (result.status === "success" && result.content) {
+            appendMessage("assistant", result.content);
+          } else if (result.status === "error") {
+            appendMessage("system", "Error: " + (result.content || "unknown error"));
+          } else if (result.status === "timeout") {
+            appendMessage("system", "Response timeout - check Codex for the reply");
+          }
+        }, 300); // 5 min timeout for long responses
+      }
     } catch (e) {
       appendMessage("system", "Network error: " + e.message);
     }
@@ -393,7 +540,11 @@
     var el = document.createElement("div");
     el.className = "msg " + role;
     el.dataset.role = role;
-    el.textContent = content;
+    if (role === "assistant") {
+      el.innerHTML = '<div class="md-content">' + renderMarkdown(content) + '</div>';
+    } else {
+      el.textContent = content;
+    }
     messageListEl.appendChild(el);
     scrollToBottom();
   }
@@ -401,17 +552,68 @@
   // --- New chat ---
   document.getElementById("newChatBtn").addEventListener("click", async function () {
     try {
-      await fetch("/api/remote/new-chat", {
+      var body = {};
+      if (selectedProject && selectedProject.cwd) {
+        body.cwd = selectedProject.cwd;
+      }
+      var r = await fetch("/api/remote/new-chat", {
         method: "POST",
         headers: authHeaders(),
+        body: JSON.stringify(body),
       });
+      var data = await r.json();
       currentThreadId = null;
-      chatTitle.textContent = "New Chat";
-      messageListEl.innerHTML = '<div class="empty-state"><p>New conversation started</p></div>';
+      var titleText = selectedProject ? "New Chat - " + selectedProject.label : "New Chat";
+      chatTitle.textContent = titleText;
+      messageListEl.innerHTML = '<div class="empty-state"><p>Creating new conversation...</p>' +
+        (selectedProject ? '<p style="font-size:12px;margin-top:6px;color:var(--accent)">Project: ' + escapeHtml(selectedProject.label) + '</p>' : '') +
+        '</div>';
       highlightThread(null);
       closeSidebar();
-    } catch (e) { /* ignore */ }
+
+      // Poll for the result of the new-chat action
+      if (data.ok && data.id) {
+        pollActionResult(data.id, function (result) {
+          if (result.status === "success") {
+            var emptyState = messageListEl.querySelector(".empty-state");
+            if (emptyState && emptyState.textContent.includes("Creating")) {
+              emptyState.innerHTML = '<p>New conversation started</p>' +
+                (selectedProject ? '<p style="font-size:12px;margin-top:6px;color:var(--accent)">Project: ' + escapeHtml(selectedProject.label) + '</p>' : '') +
+                '</div>';
+            }
+            // Reload thread list to pick up the new session
+            setTimeout(loadThreadList, 2000);
+          } else if (result.status === "error") {
+            appendMessage("system", "Failed to create new chat: " + (result.content || "unknown error"));
+          }
+        });
+      }
+    } catch (e) {
+      appendMessage("system", "Network error: " + e.message);
+    }
   });
+
+  // Poll for action results (new_chat, send, etc.)
+  function pollActionResult(actionId, callback, maxAttempts) {
+    maxAttempts = maxAttempts || 60;
+    var attempts = 0;
+    var timer = setInterval(async function () {
+      attempts++;
+      if (attempts > maxAttempts) {
+        clearInterval(timer);
+        callback({ status: "timeout", content: "Action timed out" });
+        return;
+      }
+      try {
+        var r = await fetch("/api/remote/result/" + actionId, { headers: authHeaders() });
+        var data = await r.json();
+        if (data.status && data.status !== "pending" && data.status !== "not_found") {
+          clearInterval(timer);
+          callback(data);
+        }
+      } catch (e) { /* ignore */ }
+    }, 1000);
+  }
 
   // --- Refresh ---
   document.getElementById("refreshBtn").addEventListener("click", function () {

@@ -247,6 +247,72 @@ def test_remote_client_uses_header_auth_without_query_tokens():
     assert 'fetch("/api/remote/dom-state", { headers: authHeaders()' in text
 
 
+def test_conversation_automation_uses_cdp_bridge_not_fetch_for_codex_csp():
+    text = Path("codex_session_delete/inject/conversation-automation.js").read_text(encoding="utf-8")
+
+    assert "window.__codexSessionDeleteBridge" in text
+    assert "helperRequest(\"/api/pending\"" in text
+    assert "helperRequest(\"/api/callback\"" in text
+    assert "helperRequest(\"/api/dom-report\"" in text
+    assert "HELPER_BASE" not in text
+    assert "`${HELPER_BASE}" not in text
+    assert "nativeRequest.call(window, input, init)" in text
+
+
+def test_conversation_automation_uses_project_new_chat_button_when_cwd_is_selected():
+    text = Path("codex_session_delete/inject/conversation-automation.js").read_text(encoding="utf-8")
+
+    assert "function findProjectNewChatButton(cwd)" in text
+    assert "data-app-action-sidebar-project-row" in text
+    assert "data-app-action-sidebar-project-id" in text
+    assert "workspacePathMatches(projectId, cwd)" in text
+    assert "开始新对话|新对话|new chat|start" in text
+    assert "findProjectNewChatButton(cwd) || findNewChatButton()" in text
+
+
+def test_conversation_automation_clears_old_timers_and_shields_legacy_fetch_errors():
+    text = Path("codex_session_delete/inject/conversation-automation.js").read_text(encoding="utf-8")
+
+    assert "__codexConversationAutomationTimers.forEach((timer) => clearInterval(timer))" in text
+    assert "console.clear()" in text
+    assert "__codexConversationNativeFetch" in text
+    assert "window.fetch = async function codexConversationHelperRequestShield" in text
+    assert 'path === "/api/pending"' in text
+    assert "jsonResponse({ messages: [] })" in text
+
+
+def test_conversation_automation_updates_prosemirror_state_before_submit():
+    text = Path("codex_session_delete/inject/conversation-automation.js").read_text(encoding="utf-8")
+
+    assert 'div[contenteditable="true"][data-codex-composer="true"]' in text
+    assert 'div.ProseMirror[contenteditable="true"]' in text
+    assert "function selectEditableContents(el)" in text
+    assert 'document.execCommand("insertText", false, prompt)' in text
+    assert "range.selectNodeContents(el)" in text
+
+
+def test_conversation_automation_submits_from_composer_root_not_first_svg_button():
+    text = Path("codex_session_delete/inject/conversation-automation.js").read_text(encoding="utf-8")
+
+    assert "function findComposerRoot()" in text
+    assert "function findSubmitButton()" in text
+    assert "const root = findComposerRoot()" in text
+    assert "const buttons = Array.from(root.querySelectorAll(\"button\"))" in text
+    assert "for (let i = buttons.length - 1; i >= 0; i--)" in text
+    assert "stop|停止|添加|文件|权限|access|model|模型" in text
+    assert 'if ((btn.textContent || "").trim()) continue' in text
+    assert "btn.querySelector(\"svg\")" in text
+
+
+def test_conversation_automation_waits_for_submit_button_after_input():
+    text = Path("codex_session_delete/inject/conversation-automation.js").read_text(encoding="utf-8")
+
+    assert "for (let attempt = 0; attempt < 20; attempt++)" in text
+    assert "const submitBtn = findSubmitButton()" in text
+    assert "await new Promise(r => setTimeout(r, 150))" in text
+    assert 'reportResult(msgId, "error", "Cannot find enabled submit button")' in text
+
+
 def test_remote_threads_route_accepts_header_token(tmp_path):
     db_path = tmp_path / "state.sqlite"
     with sqlite3.connect(db_path) as db:
@@ -364,7 +430,8 @@ def test_remote_new_chat_route_accepts_token_query_string():
         server.shutdown()
         thread.join(timeout=3)
 
-    assert result == {"status": "cdp_unavailable"}
+    assert result["ok"] is True
+    assert "id" in result
 
 def test_cdp_evaluate_returns_without_reentrant_lock_deadlock(monkeypatch):
     service = FakeDeleteService()

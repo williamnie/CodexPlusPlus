@@ -72,6 +72,7 @@ class CodexPlusRuntime:
     websocket_url: str | None
     user_scripts: UserScriptManager
     debug_port: int | None = None
+    helper_server: HelperServer | None = None
 
     def reload_user_scripts(self) -> dict[str, object]:
         if self.websocket_url:
@@ -88,6 +89,38 @@ class CodexPlusRuntime:
 
     def repair_backend(self) -> dict[str, object]:
         return self.backend_status()
+
+    def helper_pending_messages(self) -> dict[str, object]:
+        if not self.helper_server:
+            return {"messages": []}
+        messages = list(self.helper_server.pending_messages)
+        self.helper_server.pending_messages.clear()
+        return {"messages": messages}
+
+    def helper_store_result(self, payload: dict[str, object]) -> dict[str, object]:
+        if not self.helper_server:
+            return {"ok": False, "error": "helper_unavailable"}
+        self.helper_server.store_result(
+            str(payload.get("id", "")),
+            str(payload.get("status", "success")),
+            str(payload.get("content", "")),
+        )
+        return {"ok": True}
+
+    def helper_dom_report(self, payload: dict[str, object]) -> dict[str, object]:
+        if not self.helper_server:
+            return {"ok": False, "error": "helper_unavailable"}
+        web_thread = self.helper_server.dom_state_store._state.get("web_active_thread")
+        desktop_thread = str(payload.get("active_thread_id") or "")
+        if web_thread and desktop_thread and web_thread == desktop_thread:
+            self.helper_server.dom_state_store.update(payload)
+        else:
+            filtered = {
+                k: v for k, v in payload.items()
+                if k not in ("messages", "is_streaming", "streaming_content")
+            }
+            self.helper_server.dom_state_store.update(filtered)
+        return {"ok": True}
 
 
 def user_scripts_config_dir() -> Path:
@@ -339,6 +372,7 @@ def launch_and_inject(app_dir: Path | None, db_path: Path | None, backup_dir: Pa
     runtime = CodexPlusRuntime(None, user_script_manager, debug_port)
     web_token = generate_web_token()
     server = start_helper(service, export_service, port=helper_port, web_token=web_token)
+    runtime.helper_server = server
     server.db_path = db_path
     codex_proc = None
     try:
@@ -397,6 +431,12 @@ def handle_bridge_request(
         return runtime.backend_status()
     if path == "/backend/repair" and runtime:
         return runtime.repair_backend()
+    if path == "/api/pending" and runtime:
+        return runtime.helper_pending_messages()
+    if path == "/api/callback" and runtime:
+        return runtime.helper_store_result(payload)
+    if path == "/api/dom-report" and runtime:
+        return runtime.helper_dom_report(payload)
     if path == "/delete":
         session = SessionRef(session_id=str(payload.get("session_id", "")), title=str(payload.get("title", "")))
         return service.delete(session).to_dict()
