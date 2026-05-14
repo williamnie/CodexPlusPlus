@@ -87,7 +87,22 @@
   let sseConnected = false;
   let selectedProject = null; // {label, cwd}
   let lastThreadListJson = "";
+  let lastThreadListData = { projects: {}, ungrouped: [] };
+  let pendingNewChat = null;
   let threadPollTimer = null;
+  let soundReminderEnabled = localStorage.getItem("codexRemoteSoundEnabled") === "1";
+  let audioPermissionPromptEl = null;
+  let completionAudioContext = null;
+  let lastRemoteStreaming = false;
+  let lastStreamingThreadId = "";
+  let lastCompletionKey = "";
+  let remoteStateSeen = false;
+  let remoteToastTimer = null;
+
+  const COMPLETION_PREVIEW_LIMIT = 120;
+  const COMPLETION_TOAST_MS = 5000;
+  const COMPLETION_SOUND_GAIN = 0.08;
+  const COMPLETION_SOUND_DURATION = 0.16;
 
   // --- DOM refs ---
   const threadListEl = document.getElementById("threadList");
@@ -108,6 +123,7 @@
     loadThreadList();
     connectSSE();
     checkHealth();
+    showAudioPermissionPrompt();
     // Re-inject automation script to ensure it's active
     fetch("/api/remote/reinject", { method: "POST", headers: authHeaders() }).catch(function () {});
     if (!threadPollTimer) {
@@ -131,6 +147,106 @@
     } catch {
       connDot.className = "conn-dot err";
     }
+  }
+
+  // --- Completion alerts ---
+  function showAudioPermissionPrompt() {
+    if (soundReminderEnabled || audioPermissionPromptEl || !supportsAudioReminder()) return;
+    const el = document.createElement("div");
+    el.className = "audio-permission-banner";
+    el.innerHTML = '<div class="audio-prompt-copy">' +
+      '<strong>启用任务完成提示音</strong>' +
+      '<span>点击授权后，Codex 完成回复时会播放提示音。</span>' +
+      '</div>' +
+      '<div class="audio-prompt-actions">' +
+      '<button type="button" class="btn-audio-enable">启用声音提醒</button>' +
+      '<button type="button" class="btn-audio-later">稍后</button>' +
+      '</div>';
+    el.querySelector(".btn-audio-enable").addEventListener("click", enableSoundReminder);
+    el.querySelector(".btn-audio-later").addEventListener("click", hideAudioPermissionPrompt);
+    document.body.appendChild(el);
+    audioPermissionPromptEl = el;
+  }
+
+  function hideAudioPermissionPrompt() {
+    if (!audioPermissionPromptEl) return;
+    audioPermissionPromptEl.remove();
+    audioPermissionPromptEl = null;
+  }
+
+  function supportsAudioReminder() {
+    return !!(window.AudioContext || window.webkitAudioContext);
+  }
+
+  async function enableSoundReminder() {
+    try {
+      await ensureAudioContext();
+      soundReminderEnabled = true;
+      localStorage.setItem("codexRemoteSoundEnabled", "1");
+      hideAudioPermissionPrompt();
+      playCompletionSound();
+      requestNotificationPermission();
+      showRemoteToast("声音提醒已启用", "任务完成后会在此页面播放提示音。");
+    } catch (e) {
+      showRemoteToast("无法启用声音", "请确认浏览器允许此页面播放音频后重试。");
+    }
+  }
+
+  async function ensureAudioContext() {
+    const AudioCtor = window.AudioContext || window.webkitAudioContext;
+    if (!AudioCtor) throw new Error("AudioContext unavailable");
+    if (!completionAudioContext) completionAudioContext = new AudioCtor();
+    if (completionAudioContext.state === "suspended") {
+      await completionAudioContext.resume();
+    }
+    return completionAudioContext;
+  }
+
+  function playCompletionSound() {
+    if (!soundReminderEnabled) {
+      showAudioPermissionPrompt();
+      return;
+    }
+    ensureAudioContext().then(playCompletionTone).catch(showAudioPermissionPrompt);
+  }
+
+  function playCompletionTone(ctx) {
+    const now = ctx.currentTime;
+    [660, 880].forEach(function (frequency, index) {
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      const startAt = now + index * COMPLETION_SOUND_DURATION;
+      osc.type = "sine";
+      osc.frequency.value = frequency;
+      gain.gain.setValueAtTime(0.0001, startAt);
+      gain.gain.exponentialRampToValueAtTime(COMPLETION_SOUND_GAIN, startAt + 0.02);
+      gain.gain.exponentialRampToValueAtTime(0.0001, startAt + COMPLETION_SOUND_DURATION);
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.start(startAt);
+      osc.stop(startAt + COMPLETION_SOUND_DURATION + 0.03);
+    });
+  }
+
+  function requestNotificationPermission() {
+    if (!("Notification" in window) || Notification.permission !== "default") return;
+    Promise.resolve(Notification.requestPermission()).catch(function () {});
+  }
+
+  function showRemoteToast(title, message) {
+    var toast = document.getElementById("remoteCompletionToast");
+    if (!toast) {
+      toast = document.createElement("div");
+      toast.id = "remoteCompletionToast";
+      toast.className = "remote-toast";
+      toast.setAttribute("role", "status");
+      toast.setAttribute("aria-live", "polite");
+      document.body.appendChild(toast);
+    }
+    toast.innerHTML = '<strong>' + escapeHtml(title) + '</strong><span>' + escapeHtml(message) + '</span>';
+    toast.classList.add("visible");
+    clearTimeout(remoteToastTimer);
+    remoteToastTimer = setTimeout(function () { toast.classList.remove("visible"); }, COMPLETION_TOAST_MS);
   }
 
   // --- Project selection ---
@@ -171,11 +287,55 @@
       var json = JSON.stringify(data);
       if (json === lastThreadListJson) return;
       lastThreadListJson = json;
+      lastThreadListData = data;
       renderThreadList(data);
-      if (currentThreadId) highlightThread(currentThreadId);
+      updateCurrentThreadHeader();
+      if (!maybeAutoOpenPendingNewChat(data) && currentThreadId) highlightThread(currentThreadId);
     } catch (e) {
       // Silently fail on poll errors to avoid disrupting the UI
     }
+  }
+
+  function flattenThreadsFromData(data) {
+    const threads = [];
+    const projects = data && data.projects ? data.projects : {};
+    Object.keys(projects).forEach(function (name) {
+      (projects[name] || []).forEach(function (thread) { threads.push(thread); });
+    });
+    ((data && data.ungrouped) || []).forEach(function (thread) { threads.push(thread); });
+    return threads;
+  }
+
+  function rememberPendingNewChat() {
+    pendingNewChat = {
+      startedAt: Date.now(),
+      cwd: selectedProject && selectedProject.cwd ? selectedProject.cwd : "",
+      label: selectedProject && selectedProject.label ? selectedProject.label : "",
+      knownThreadIds: new Set(flattenThreadsFromData(lastThreadListData).map(function (thread) { return thread.id; })),
+    };
+  }
+
+  function maybeAutoOpenPendingNewChat(data) {
+    if (!pendingNewChat) return false;
+    const isExpired = Date.now() - pendingNewChat.startedAt > 30000;
+    if (isExpired) {
+      pendingNewChat = null;
+      return false;
+    }
+    const candidates = flattenThreadsFromData(data).filter(function (thread) {
+      if (!thread.id || pendingNewChat.knownThreadIds.has(thread.id)) return false;
+      return !pendingNewChat.cwd || !thread.cwd || thread.cwd === pendingNewChat.cwd;
+    });
+    if (candidates.length === 0) return false;
+    candidates.sort(function (a, b) { return threadSortMs(b) - threadSortMs(a); });
+    const candidate = candidates[0];
+    pendingNewChat = null;
+    navigateToThread(candidate.id, { auto: true });
+    return true;
+  }
+
+  function threadSortMs(thread) {
+    return Number(thread.updated_at_ms || thread.created_at_ms || 0);
   }
 
   function renderThreadList(data) {
@@ -295,21 +455,18 @@
   });
 
   // --- Navigation ---
-  async function navigateToThread(threadId) {
+  async function navigateToThread(threadId, options) {
+    options = options || {};
+    if (!options.auto) pendingNewChat = null;
     currentThreadId = threadId;
     highlightThread(threadId);
     closeSidebar();
 
-    const meta = threadMeta[threadId];
-    chatTitle.textContent = meta ? meta.title || "Untitled" : threadId;
+    updateCurrentThreadHeader();
 
-    // Auto-select the project this thread belongs to
-    if (meta && meta.cwd) {
-      var label = meta.cwd.split("/").pop() || meta.cwd;
-      selectProject(label, meta.cwd);
+    if (!options.preserveMessages) {
+      messageListEl.innerHTML = '<div class="msg-loading">Loading...</div>';
     }
-
-    messageListEl.innerHTML = '<div class="msg-loading">Loading...</div>';
 
     try {
       await fetch("/api/remote/navigate", {
@@ -326,6 +483,16 @@
         loading.textContent = "Waiting for messages...";
       }
     }, 3000);
+  }
+
+  function updateCurrentThreadHeader() {
+    if (!currentThreadId) return;
+    const meta = threadMeta[currentThreadId];
+    chatTitle.textContent = meta ? meta.title || "Untitled" : currentThreadId;
+    if (meta && meta.cwd) {
+      var label = meta.cwd.split("/").pop() || meta.cwd;
+      selectProject(label, meta.cwd);
+    }
   }
 
   function highlightThread(id) {
@@ -399,27 +566,60 @@
   }
 
   function handleDomState(state) {
+    const previousStreaming = lastRemoteStreaming;
+    const previousThreadId = lastStreamingThreadId;
+
     // 桌面端切换了线程，但 Web 用户正在查看特定线程时不跟随
     if (state.active_thread_id && state.active_thread_id !== currentThreadId) {
       if (state.web_active_thread && state.web_active_thread === currentThreadId) {
         // Web 用户正在查看特定线程，不跟随桌面端
       } else {
-        currentThreadId = state.active_thread_id;
-        highlightThread(currentThreadId);
-        var meta = threadMeta[currentThreadId];
-        if (meta) {
-          chatTitle.textContent = meta.title || "Untitled";
-          if (meta.cwd) {
-            var label = meta.cwd.split("/").pop() || meta.cwd;
-            selectProject(label, meta.cwd);
-          }
-        }
+        navigateToThread(state.active_thread_id, { auto: true, preserveMessages: true });
       }
     }
 
     if (state.messages && state.messages.length > 0) {
       renderMessages(state.messages, state.is_streaming);
     }
+
+    maybeNotifyTaskCompleted(state, previousStreaming, previousThreadId);
+    lastRemoteStreaming = !!state.is_streaming;
+    if (state.active_thread_id) lastStreamingThreadId = state.active_thread_id;
+    remoteStateSeen = true;
+  }
+
+  function maybeNotifyTaskCompleted(state, previousStreaming, previousThreadId) {
+    if (!remoteStateSeen || !previousStreaming || state.is_streaming) return;
+    if (!state.active_thread_id || previousThreadId !== state.active_thread_id) return;
+    const assistantMessage = lastAssistantMessage(state.messages || []);
+    if (!assistantMessage) return;
+    const key = state.active_thread_id + ":" + assistantMessage.content;
+    if (key === lastCompletionKey) return;
+    lastCompletionKey = key;
+    const preview = assistantMessage.content.slice(0, COMPLETION_PREVIEW_LIMIT);
+    showRemoteToast("任务已完成", preview);
+    playCompletionSound();
+    showCompletionNotification(preview);
+  }
+
+  function lastAssistantMessage(messages) {
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const msg = messages[i];
+      if (msg && msg.role === "assistant" && String(msg.content || "").trim()) {
+        return { content: String(msg.content).trim() };
+      }
+    }
+    return null;
+  }
+
+  function showCompletionNotification(message) {
+    if (!("Notification" in window) || Notification.permission !== "granted") return;
+    try {
+      new Notification("Codex++ 任务已完成", {
+        body: message || "远程会话已有新的回复。",
+        silent: true,
+      });
+    } catch (e) { /* ignore */ }
   }
 
   // --- Message rendering ---
@@ -475,7 +675,15 @@
   }
 
   function scrollToBottom() {
-    messageListEl.scrollTop = messageListEl.scrollHeight;
+    function applyScrollToBottom() {
+      messageListEl.scrollTop = messageListEl.scrollHeight;
+    }
+    applyScrollToBottom();
+    if (typeof requestAnimationFrame === "function") {
+      requestAnimationFrame(applyScrollToBottom);
+    }
+    setTimeout(applyScrollToBottom, 50);
+    setTimeout(applyScrollToBottom, 200);
   }
 
   // --- Send message ---
@@ -556,6 +764,7 @@
       if (selectedProject && selectedProject.cwd) {
         body.cwd = selectedProject.cwd;
       }
+      rememberPendingNewChat();
       var r = await fetch("/api/remote/new-chat", {
         method: "POST",
         headers: authHeaders(),
@@ -582,13 +791,19 @@
                 '</div>';
             }
             // Reload thread list to pick up the new session
-            setTimeout(loadThreadList, 2000);
+            setTimeout(loadThreadList, 500);
+            setTimeout(loadThreadList, 1500);
+            setTimeout(loadThreadList, 3000);
           } else if (result.status === "error") {
+            pendingNewChat = null;
             appendMessage("system", "Failed to create new chat: " + (result.content || "unknown error"));
           }
         });
+      } else {
+        pendingNewChat = null;
       }
     } catch (e) {
+      pendingNewChat = null;
       appendMessage("system", "Network error: " + e.message);
     }
   });

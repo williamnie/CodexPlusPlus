@@ -247,6 +247,87 @@ def test_remote_client_uses_header_auth_without_query_tokens():
     assert 'fetch("/api/remote/dom-state", { headers: authHeaders()' in text
 
 
+def test_remote_client_auto_opens_new_chat_after_thread_list_sync():
+    text = Path("codex_session_delete/static/app.js").read_text(encoding="utf-8")
+
+    assert "let pendingNewChat = null" in text
+    assert "function rememberPendingNewChat()" in text
+    assert "function maybeAutoOpenPendingNewChat(data)" in text
+    assert "maybeAutoOpenPendingNewChat(data)" in text[text.index("async function loadThreadList"):text.index("function renderThreadList")]
+    assert "knownThreadIds: new Set(flattenThreadsFromData" in text
+    assert "navigateToThread(candidate.id, { auto: true })" in text
+    assert "setTimeout(loadThreadList, 500)" in text
+
+
+def test_remote_client_auto_follow_sets_web_active_thread_for_dom_updates():
+    text = Path("codex_session_delete/static/app.js").read_text(encoding="utf-8")
+    start = text.index("function handleDomState")
+    end = text.index("\n\n  // --- Message rendering ---", start)
+    handle_dom_state = text[start:end]
+
+    assert "state.web_active_thread && state.web_active_thread === currentThreadId" in handle_dom_state
+    assert "navigateToThread(state.active_thread_id, { auto: true, preserveMessages: true })" in handle_dom_state
+
+
+def test_remote_client_scrolls_to_bottom_after_layout_settles():
+    text = Path("codex_session_delete/static/app.js").read_text(encoding="utf-8")
+    start = text.index("function scrollToBottom")
+    end = text.index("\n\n  // --- Send message ---", start)
+    scroll_code = text[start:end]
+
+    assert "function applyScrollToBottom()" in scroll_code
+    assert "messageListEl.scrollTop = messageListEl.scrollHeight" in scroll_code
+    assert "requestAnimationFrame(applyScrollToBottom)" in scroll_code
+    assert "setTimeout(applyScrollToBottom, 50)" in scroll_code
+    assert "setTimeout(applyScrollToBottom, 200)" in scroll_code
+
+
+def test_remote_client_prompts_for_completion_sound_permission():
+    text = Path("codex_session_delete/static/app.js").read_text(encoding="utf-8")
+
+    assert "function showAudioPermissionPrompt()" in text
+    assert "启用任务完成提示音" in text
+    assert "function enableSoundReminder()" in text
+    assert 'localStorage.setItem("codexRemoteSoundEnabled", "1")' in text
+    assert "window.AudioContext || window.webkitAudioContext" in text
+    assert "requestNotificationPermission()" in text
+    assert "showAudioPermissionPrompt();" in text[text.index("function init()"):text.index("\n\n  window.addEventListener")]
+
+
+def test_remote_client_notifies_when_streaming_finishes_with_assistant_message():
+    text = Path("codex_session_delete/static/app.js").read_text(encoding="utf-8")
+    start = text.index("function handleDomState")
+    end = text.index("\n\n  // --- Message rendering ---", start)
+    remote_state_code = text[start:end]
+
+    assert "maybeNotifyTaskCompleted(state, previousStreaming, previousThreadId)" in remote_state_code
+    assert "lastRemoteStreaming = !!state.is_streaming" in remote_state_code
+    assert "function maybeNotifyTaskCompleted" in remote_state_code
+    assert "!previousStreaming || state.is_streaming" in remote_state_code
+    assert "previousThreadId !== state.active_thread_id" in remote_state_code
+    assert "lastAssistantMessage(state.messages || [])" in remote_state_code
+    assert "showRemoteToast(\"任务已完成\", preview)" in remote_state_code
+    assert "playCompletionSound()" in remote_state_code
+    assert "showCompletionNotification(preview)" in remote_state_code
+
+
+def test_remote_css_allows_message_list_to_be_scroll_container():
+    text = Path("codex_session_delete/static/style.css").read_text(encoding="utf-8")
+
+    assert ".chat-area{flex:1;display:flex;flex-direction:column;min-width:0;min-height:0;" in text
+    assert ".message-list{flex:1;min-height:0;overflow-y:auto;" in text
+
+
+def test_remote_css_styles_sound_permission_and_completion_toast():
+    text = Path("codex_session_delete/static/style.css").read_text(encoding="utf-8")
+
+    assert ".audio-permission-banner{" in text
+    assert ".btn-audio-enable{" in text
+    assert ".remote-toast{" in text
+    assert ".remote-toast.visible{" in text
+    assert "@keyframes remoteSlideUp" in text
+
+
 def test_conversation_automation_uses_cdp_bridge_not_fetch_for_codex_csp():
     text = Path("codex_session_delete/inject/conversation-automation.js").read_text(encoding="utf-8")
 
