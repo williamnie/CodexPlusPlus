@@ -18,7 +18,6 @@ from codex_session_delete.api_adapter import ApiAdapter, UnavailableApiAdapter
 from codex_session_delete.backup_store import BackupStore
 from codex_session_delete.cdp import evaluate_user_scripts, inject_file, open_devtools
 from codex_session_delete.helper_server import HelperServer
-from codex_session_delete.helper_server import fetch_ad_list
 from codex_session_delete.markdown_exporter import MarkdownExportService
 from codex_session_delete.models import DeleteResult, DeleteStatus, SessionRef
 from codex_session_delete.provider_sync import ProviderSyncStatus, run_provider_sync
@@ -92,9 +91,6 @@ class CodexPlusRuntime:
 
     def repair_backend(self) -> dict[str, object]:
         return self.backend_status()
-
-    def ads(self) -> dict[str, object]:
-        return fetch_ad_list()
 
     def helper_pending_messages(self) -> dict[str, object]:
         if not self.helper_server:
@@ -449,8 +445,6 @@ def handle_bridge_request(
         return runtime.backend_status()
     if path == "/backend/repair" and runtime:
         return runtime.repair_backend()
-    if path == "/ads" and runtime:
-        return runtime.ads()
     if path == "/api/pending" and runtime:
         return runtime.helper_pending_messages()
     if path == "/api/callback" and runtime:

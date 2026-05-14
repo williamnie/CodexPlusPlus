@@ -6,34 +6,13 @@ import sqlite3
 import threading
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from importlib import resources
 from pathlib import Path
 from typing import Protocol
-from urllib.parse import unquote
-from urllib.request import Request, urlopen
 
 import websocket
 
 from codex_session_delete.models import DeleteResult, DeleteStatus, ExportResult, ExportStatus, SessionRef
 from codex_session_delete.remote_web import DomStateStore, RolloutWatcher, _load_messages_from_rollout, handle_sse, serve_remote_index, serve_static_file, validate_token
-
-DEFAULT_AD_LIST_URLS = [
-    "https://raw.githubusercontent.com/BigPizzaV3/Ad-List/main/ads.json",
-    "https://cdn.jsdelivr.net/gh/BigPizzaV3/Ad-List@main/ads.json",
-]
-
-
-def fetch_ad_list(urls: list[str] | None = None) -> dict[str, object]:
-    last_error: Exception | None = None
-    for url in urls or DEFAULT_AD_LIST_URLS:
-        try:
-            request = Request(url, headers={"User-Agent": "CodexPlusPlus"})
-            with urlopen(request, timeout=10) as response:
-                return json.loads(response.read().decode("utf-8"))
-        except Exception as exc:
-            last_error = exc
-    raise last_error or RuntimeError("ad list unavailable")
-
 
 class DeleteService(Protocol):
     def delete(self, session: SessionRef) -> DeleteResult: ...
@@ -58,8 +37,6 @@ class HelperServer(ThreadingHTTPServer):
         *,
         allow_http_mutation: bool = False,
         http_mutation_token: str | None = None,
-        ad_list_url: str = "https://raw.githubusercontent.com/BigPizzaV3/Ad-List/main/ads.json",
-        ad_list_backup_urls: list[str] | None = None,
     ):
         self.service = service
         self.export_service = export_service
@@ -72,7 +49,6 @@ class HelperServer(ThreadingHTTPServer):
         self._msg_seq_lock = threading.Lock()
         self.pending_messages: list[dict[str, str]] = []
         self.results: dict[str, dict[str, str]] = {}
-        self.ad_list_urls = [ad_list_url, *(ad_list_backup_urls or DEFAULT_AD_LIST_URLS[1:])]
         self.web_token: str | None = None
         self.db_path: Path | None = None
         self.dom_state_store = DomStateStore()
@@ -178,12 +154,6 @@ class _Handler(BaseHTTPRequestHandler):
             else:
                 pending = any(m["id"] == msg_id for m in self.server.pending_messages)
                 self._send_json({"status": "pending" if pending else "not_found", "content": ""})
-            return
-        if path == "/ads":
-            self._send_ads()
-            return
-        if path.startswith("/assets/"):
-            self._send_asset(path.removeprefix("/assets/"))
             return
         # --- Remote Desktop routes ---
         if path == "/" or path.startswith("/remote"):
@@ -515,22 +485,6 @@ class _Handler(BaseHTTPRequestHandler):
         self.send_header("Access-Control-Allow-Headers", "Content-Type, X-Codex-Session-Delete-Token, X-Web-Token")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
         self.send_header("Access-Control-Allow-Private-Network", "true")
-        self.send_header("Content-Length", str(len(data)))
-        self.end_headers()
-        self.wfile.write(data)
-
-    def _send_ads(self) -> None:
-        self._send_json(fetch_ad_list(self.server.ad_list_urls))
-
-    def _send_asset(self, name: str) -> None:
-        asset_name = unquote(name)
-        if asset_name not in {"sponsor-alipay.jpg", "sponsor-wechat.jpg", "rawchat-sponsor.jpg"}:
-            self._send_json({"error": "not found"}, status=404)
-            return
-        data = resources.files("codex_session_delete").joinpath("assets", asset_name).read_bytes()
-        self.send_response(200)
-        self.send_header("Content-Type", "image/jpeg")
-        self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
         self.wfile.write(data)

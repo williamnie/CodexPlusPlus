@@ -26,7 +26,6 @@ class FakeRuntime:
         self.injected = []
         self.devtools_opened = False
         self.repaired = False
-        self.ads_payload = {"version": 1, "ads": [{"id": "runtime-ad", "type": "normal", "title": "Runtime Ad", "description": "Loaded", "url": "https://0029.org", "highlights": []}]}
 
     def reload_user_scripts(self):
         bundle = self.user_scripts.build_enabled_bundle()
@@ -43,9 +42,6 @@ class FakeRuntime:
     def repair_backend(self):
         self.repaired = True
         return {"status": "ok", "message": "后端已修复"}
-
-    def ads(self):
-        return self.ads_payload
 
 
 def test_handle_bridge_request_lists_user_scripts(tmp_path):
@@ -108,15 +104,6 @@ def test_handle_bridge_request_sets_backend_settings(monkeypatch, tmp_path):
 
     assert result == {"providerSyncEnabled": True}
     assert store.load().provider_sync_enabled is True
-
-
-def test_handle_bridge_request_returns_ads(tmp_path):
-    manager = UserScriptManager(tmp_path / "builtin", tmp_path / "user", tmp_path / "config.json")
-    runtime = FakeRuntime(manager)
-
-    result = handle_bridge_request(FakeDeleteService(), FakeExportService(), "/ads", {}, runtime)
-
-    assert result["ads"][0]["id"] == "runtime-ad"
 
 
 def test_handle_bridge_request_serves_conversation_automation_queue(tmp_path):

@@ -43,29 +43,11 @@ python -m codex_session_delete setup
 
 This creates `/Applications/Codex++.app`.
 
-## Community and Support
+## Community
 
 Scan the QR code to join the Codex++ discussion group, report issues, share usage notes, or suggest features:
 
 <img src="docs/images/discussion-group-qr.jpg" alt="Codex++ discussion group QR code" width="260">
-
-If Codex++ has helped you, you can buy me a coffee or send a small tip to support continued maintenance.
-
-<p align="center">
-  <img src="docs/images/sponsor-alipay.jpg" alt="Alipay sponsor QR code" width="220">
-  <img src="docs/images/sponsor-wechat.jpg" alt="WeChat sponsor QR code" width="220">
-</p>
-
-## Sponsor
-
-<table>
-  <tr>
-    <th>🏆 Sponsor 🏆</th>
-  </tr>
-  <tr>
-    <td>👉 <a href="https://rawchat.cn">RawChat | Codex Relay</a> A long-running Codex relay provider with monthly plans, low-rate calls, high cache-hit performance, Pro/Plus account pools, and dedicated all-day maintenance.</td>
-  </tr>
-</table>
 
 ## Highlights
 
@@ -77,6 +59,7 @@ If Codex++ has helped you, you can buy me a coffee or send a small tip to suppor
 - Project move for normal conversations and local projects.
 - Conversation Timeline with question markers, hover summaries, and quick jump.
 - Provider Sync so historical conversations remain visible after switching `model_provider`.
+- Remote Desktop prints local and LAN URLs after launch, so you can view sessions, send messages, start new chats, and receive completion reminders from a browser.
 - Windows shortcuts, uninstall entries, optional watcher takeover, and GitHub Release updates.
 - macOS `/Applications/Codex++.app` bundle generation.
 
@@ -104,7 +87,7 @@ The top bar shows `Codex++`, backend status, and the settings panel:
 1. Starts the Codex App with CDP flags:
    - `--remote-debugging-port=9229`
    - `--remote-allow-origins=http://127.0.0.1:9229`
-2. Starts a local helper service for health checks, settings, export, move, and delete operations.
+2. Starts a local helper service for health checks, settings, export, move, delete, and Remote Desktop operations.
 3. Injects `renderer-inject.js` through CDP.
 4. The renderer calls local services through the CDP bridge. Delete/undo HTTP routes are not exposed by default, preventing accidental deletion from unrelated local pages.
 5. Codex inherits existing proxy environment variables; if none are set, Codex++ auto-detects common local proxy ports for GitHub resources.
@@ -118,6 +101,32 @@ When `Provider Sync` is enabled, Codex++ synchronizes local session metadata bef
 In short, you can switch model_provider without losing historical conversations.
 
 It aligns rollout files, SQLite thread records, and project path caches. It only fixes visibility metadata and does not rewrite message content. Busy files or SQLite locks are skipped so startup can continue.
+
+## Remote Desktop
+
+After running `python -m codex_session_delete launch`, the terminal prints Remote Desktop access URLs:
+
+```text
+Remote Desktop URLs:
+  Local: http://127.0.0.1:57321/remote/?token=<access-token>
+  LAN:   http://<your-lan-ip>:57321/remote/?token=<access-token>
+```
+
+Open the `Local` URL from the same machine, or the `LAN` URL from a phone or another computer on the same network. The first visit needs the `token` query string. The web client stores the token, removes it from the address bar, and authenticates later API calls with the `X-Web-Token` header.
+
+Remote Desktop supports:
+
+- Browsing sessions by project and opening historical conversations.
+- Following the desktop conversation state, including messages and streaming output.
+- Sending new messages and starting new chats, optionally with a project directory.
+- Merging fresh messages when the desktop and web clients are viewing the same thread.
+- Completion reminders through browser sound, toast, and system notifications.
+
+Notes:
+
+- The helper service listens on `0.0.0.0:<helper-port>` by default; LAN access requires your system firewall to allow that port.
+- The access token is generated per launch. Do not share URLs that contain the token publicly.
+- Use `--helper-port` if you need a custom port.
 
 ## Common Commands
 

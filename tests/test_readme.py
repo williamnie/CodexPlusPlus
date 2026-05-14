@@ -40,17 +40,14 @@ def test_readme_documents_provider_sync_as_no_session_loss():
     assert "不丢历史会话" in text
 
 
-def test_readme_includes_sponsor_qr_codes_near_front():
+def test_readme_documents_remote_desktop_feature():
     text = Path("README.md").read_text(encoding="utf-8")
 
-    assert "## 赞赏支持" in text
-    assert "请我喝杯咖啡" in text
-    assert '<img src="docs/images/sponsor-alipay.jpg"' in text
-    assert '<img src="docs/images/sponsor-wechat.jpg"' in text
-    assert 'width="220"' in text
-    assert Path("docs/images/sponsor-alipay.jpg").exists()
-    assert Path("docs/images/sponsor-wechat.jpg").exists()
-    assert text.index("## 赞赏支持") < text.index("## 功能亮点")
+    assert "## 远程桌面" in text
+    assert "Remote Desktop URLs" in text
+    assert "/remote/?token=" in text
+    assert "X-Web-Token" in text
+    assert "任务完成提醒" in text
 
 
 def test_english_readme_exists_and_matches_core_sections():
@@ -61,6 +58,8 @@ def test_english_readme_exists_and_matches_core_sections():
     assert "[中文](README.md)" not in text
     assert "Provider Sync" in text
     assert "switch model_provider without losing historical conversations" in text
+    assert "Remote Desktop" in text
+    assert "Remote Desktop URLs" in text
     assert "img.shields.io/github/v/release/BigPizzaV3/CodexPlusPlus" in text
     assert "contrib.rocks/image?repo=BigPizzaV3/CodexPlusPlus" in text
     assert "api.star-history.com/svg?repos=BigPizzaV3/CodexPlusPlus" in text
