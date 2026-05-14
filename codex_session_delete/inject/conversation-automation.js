@@ -181,4 +181,79 @@
   }
 
   setInterval(pollMessages, 200);
+
+  // --- DOM State Reporter for Remote Desktop ---
+  (function installDomReporter() {
+    const REPORT_INTERVAL = 800;
+    let lastHash = "";
+
+    function getActiveThreadId() {
+      const urlMatch = window.location.href.match(/thread[=/:]([A-Za-z0-9_.-]+)/i);
+      if (urlMatch) return urlMatch[1];
+      const rows = document.querySelectorAll('[data-app-action-sidebar-thread-id]');
+      for (const r of rows) {
+        if (r.getAttribute("aria-current") === "page" || r.getAttribute("aria-current") === "true") {
+          return r.getAttribute("data-app-action-sidebar-thread-id");
+        }
+        const href = r.getAttribute("href") || "";
+        if (href && window.location.href.includes(href)) {
+          return r.getAttribute("data-app-action-sidebar-thread-id");
+        }
+      }
+      return null;
+    }
+
+    function extractMessages() {
+      const messages = [];
+      const turns = document.querySelectorAll('[data-testid="conversation-turn"]');
+      if (turns.length > 0) {
+        turns.forEach((turn, i) => {
+          const user = turn.querySelector('[data-message-author-role="user"]');
+          const assistant = turn.querySelector('[data-message-author-role="assistant"]');
+          if (user) messages.push({ role: "user", content: user.innerText || "", index: i });
+          if (assistant) messages.push({ role: "assistant", content: assistant.innerText || "", index: i });
+        });
+      } else {
+        document.querySelectorAll('[data-message-author-role="user"]').forEach((el, i) => {
+          messages.push({ role: "user", content: el.innerText || "", index: i * 2 });
+        });
+        document.querySelectorAll('[data-message-author-role="assistant"]').forEach((el, i) => {
+          messages.push({ role: "assistant", content: el.innerText || "", index: i * 2 + 1 });
+        });
+      }
+      return messages;
+    }
+
+    function isStreaming() {
+      const sels = ['button[aria-label="Stop"]', 'button[aria-label="停止"]', '.result-streaming'];
+      return sels.some(s => !!document.querySelector(s));
+    }
+
+    async function reportDomState() {
+      try {
+        const tid = getActiveThreadId();
+        const msgs = extractMessages();
+        const streaming = isStreaming();
+        const content = streaming ? (msgs.length > 0 ? msgs[msgs.length - 1].content : "") : "";
+
+        const hash = JSON.stringify({ t: tid, n: msgs.length, s: streaming, c: content.slice(-100) });
+        if (hash === lastHash) return;
+        lastHash = hash;
+
+        fetch(`${HELPER_BASE}/api/dom-report`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            active_thread_id: tid,
+            messages: msgs,
+            is_streaming: streaming,
+            streaming_content: content,
+            timestamp: Date.now(),
+          }),
+        }).catch(() => {});
+      } catch (e) {}
+    }
+
+    setInterval(reportDomState, REPORT_INTERVAL);
+  })();
 })();

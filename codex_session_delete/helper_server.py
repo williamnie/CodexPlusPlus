@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 import threading
+import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Protocol
@@ -9,6 +11,7 @@ from typing import Protocol
 import websocket
 
 from codex_session_delete.models import DeleteResult, DeleteStatus, ExportResult, ExportStatus, SessionRef
+from codex_session_delete.remote_web import DomStateStore, handle_sse, serve_remote_index, serve_static_file, validate_token
 
 
 class DeleteService(Protocol):
@@ -46,6 +49,9 @@ class HelperServer(ThreadingHTTPServer):
         self._msg_seq_lock = threading.Lock()
         self.pending_messages: list[dict[str, str]] = []
         self.results: dict[str, dict[str, str]] = {}
+        self.web_token: str | None = None
+        self.db_path: Path | None = None
+        self.dom_state_store = DomStateStore()
         super().__init__((host, port), _Handler)
 
     @property
@@ -63,7 +69,8 @@ class HelperServer(ThreadingHTTPServer):
         with self._cdp_lock:
             ws = websocket.create_connection(self.cdp_websocket_url, timeout=timeout)
             try:
-                msg_id = self._next_cdp_id()
+                self._cdp_msg_id += 1
+                msg_id = self._cdp_msg_id
                 ws.send(json.dumps({
                     "id": msg_id,
                     "method": "Runtime.evaluate",
@@ -107,20 +114,25 @@ class HelperServer(ThreadingHTTPServer):
 class _Handler(BaseHTTPRequestHandler):
     server: HelperServer
 
+    @property
+    def route_path(self) -> str:
+        return urllib.parse.urlparse(self.path).path
+
     def do_OPTIONS(self) -> None:
         self._send_json({"ok": True})
 
     def do_GET(self) -> None:
-        if self.path == "/health":
+        path = self.route_path
+        if path == "/health":
             self._send_json({"ok": True})
             return
-        if self.path == "/api/pending":
+        if path == "/api/pending":
             msgs = list(self.server.pending_messages)
             self.server.pending_messages.clear()
             self._send_json({"messages": msgs})
             return
-        if self.path.startswith("/api/result/"):
-            msg_id = self.path[len("/api/result/"):]
+        if path.startswith("/api/result/"):
+            msg_id = path[len("/api/result/"):]
             result = self.server.get_result(msg_id)
             if result:
                 self._send_json(result)
@@ -128,15 +140,46 @@ class _Handler(BaseHTTPRequestHandler):
                 pending = any(m["id"] == msg_id for m in self.server.pending_messages)
                 self._send_json({"status": "pending" if pending else "not_found", "content": ""})
             return
+        # --- Remote Desktop routes ---
+        if path == "/" or path.startswith("/remote"):
+            if self.server.web_token:
+                serve_remote_index(self.wfile, self.server.web_token)
+            else:
+                serve_remote_index(self.wfile, "")
+            return
+        if path.startswith("/static/"):
+            if serve_static_file(self.wfile, path):
+                return
+            self._send_json({"error": "not found"}, status=404)
+            return
+        if path.startswith("/api/remote/dom-state"):
+            if not self._check_web_token():
+                self._send_json({"error": "unauthorized"}, status=401)
+                return
+            handle_sse(self, self.server.dom_state_store, self.server.web_token or "")
+            return
+        if path == "/api/remote/dom-snapshot":
+            if not self._check_web_token():
+                self._send_json({"error": "unauthorized"}, status=401)
+                return
+            self._send_json(self.server.dom_state_store.snapshot())
+            return
+        if path == "/api/remote/threads":
+            if not self._check_web_token():
+                self._send_json({"error": "unauthorized"}, status=401)
+                return
+            self._serve_thread_list()
+            return
         self._send_json({"error": "not found"}, status=404)
 
     def do_POST(self) -> None:
         try:
+            path = self.route_path
             payload = self._read_json()
-            if self.path in {"/delete", "/undo", "/archived-thread", "/export-markdown"} and not self._is_mutation_authorized():
+            if path in {"/delete", "/undo", "/archived-thread", "/export-markdown"} and not self._is_mutation_authorized():
                 self._send_json({"error": "forbidden"}, status=403)
                 return
-            if self.path == "/api/send":
+            if path == "/api/send":
                 prompt = str(payload.get("prompt", ""))
                 if not prompt.strip():
                     self._send_json({"error": "empty prompt"}, status=400)
@@ -144,22 +187,22 @@ class _Handler(BaseHTTPRequestHandler):
                 msg_id = self.server.send_message(prompt)
                 self._send_json({"ok": True, "id": msg_id})
                 return
-            if self.path == "/api/callback":
+            if path == "/api/callback":
                 msg_id = str(payload.get("id", ""))
                 status = str(payload.get("status", "success"))
                 content = str(payload.get("content", ""))
                 self.server.store_result(msg_id, status, content)
                 self._send_json({"ok": True})
                 return
-            if self.path == "/delete":
+            if path == "/delete":
                 session = SessionRef(session_id=str(payload.get("session_id", "")), title=str(payload.get("title", "")))
                 self._send_json(self.server.service.delete(session).to_dict())
                 return
-            if self.path == "/undo":
+            if path == "/undo":
                 token = str(payload.get("undo_token", ""))
                 self._send_json(self.server.service.undo(token).to_dict())
                 return
-            if self.path == "/export-markdown":
+            if path == "/export-markdown":
                 if self.server.export_service is None:
                     self._send_json(
                         ExportResult(ExportStatus.FAILED, str(payload.get("session_id", "")), "Markdown 导出不可用").to_dict(),
@@ -169,19 +212,19 @@ class _Handler(BaseHTTPRequestHandler):
                 session = SessionRef(session_id=str(payload.get("session_id", "")), title=str(payload.get("title", "")))
                 self._send_json(self.server.export_service.export(session).to_dict())
                 return
-            if self.path == "/archived-thread":
+            if path == "/archived-thread":
                 session = self.server.service.find_archived_thread_by_title(str(payload.get("title", "")))
                 self._send_json({"session_id": session.session_id, "title": session.title} if session else {"session_id": "", "title": ""})
                 return
-            if self.path == "/move-thread-workspace":
+            if path == "/move-thread-workspace":
                 session = SessionRef(session_id=str(payload.get("session_id", "")), title=str(payload.get("title", "")))
                 self._send_json(self.server.service.move_thread_workspace(session, str(payload.get("target_cwd", ""))))
                 return
-            if self.path == "/thread-sort-key":
+            if path == "/thread-sort-key":
                 session = SessionRef(session_id=str(payload.get("session_id", "")), title=str(payload.get("title", "")))
                 self._send_json(self.server.service.thread_sort_key(session))
                 return
-            if self.path == "/thread-sort-keys":
+            if path == "/thread-sort-keys":
                 raw_sessions = payload.get("sessions", [])
                 sessions = [
                     SessionRef(session_id=str(item.get("session_id", "")), title=str(item.get("title", "")))
@@ -190,10 +233,60 @@ class _Handler(BaseHTTPRequestHandler):
                 ] if isinstance(raw_sessions, list) else []
                 self._send_json(self.server.service.thread_sort_keys(sessions))
                 return
+            # --- Remote Desktop POST routes ---
+            if path == "/api/dom-report":
+                if self.client_address[0] not in ("127.0.0.1", "::1"):
+                    self._send_json({"error": "forbidden"}, status=403)
+                    return
+                self.server.dom_state_store.update(payload)
+                self._send_json({"ok": True})
+                return
+            if path == "/api/remote/navigate":
+                if not self._check_web_token():
+                    self._send_json({"error": "unauthorized"}, status=401)
+                    return
+                thread_id = str(payload.get("thread_id", ""))
+                script = (
+                    '(() => {'
+                    f'const row = document.querySelector(\'[data-app-action-sidebar-thread-id="{thread_id}"]\');'
+                    'if (!row) return {status: "not_found"};'
+                    'const link = row.querySelector("a") || row;'
+                    'link.click();'
+                    f'return {{status: "ok", thread_id: "{thread_id}"}};'
+                    '})()'
+                )
+                result = self.server.cdp_evaluate(script)
+                self._send_json(result if isinstance(result, dict) else {"status": "cdp_unavailable"})
+                return
+            if path == "/api/remote/send":
+                if not self._check_web_token():
+                    self._send_json({"error": "unauthorized"}, status=401)
+                    return
+                prompt = str(payload.get("prompt", ""))
+                if not prompt.strip():
+                    self._send_json({"error": "empty prompt"}, status=400)
+                    return
+                msg_id = self.server.send_message(prompt)
+                self._send_json({"ok": True, "id": msg_id})
+                return
+            if path == "/api/remote/new-chat":
+                if not self._check_web_token():
+                    self._send_json({"error": "unauthorized"}, status=401)
+                    return
+                script = (
+                    '(() => {'
+                    'const sels = [\'button[aria-label="New chat"]\',\'button[aria-label="新对话"]\',\'button[aria-label="New Chat"]\'];'
+                    'for (const s of sels) { const b = document.querySelector(s); if (b) { b.click(); return {status: "ok"}; } }'
+                    'return {status: "not_found"};'
+                    '})()'
+                )
+                result = self.server.cdp_evaluate(script)
+                self._send_json(result if isinstance(result, dict) else {"status": "cdp_unavailable"})
+                return
             self._send_json({"error": "not found"}, status=404)
         except Exception as exc:
             session_id = str(payload.get("session_id", "")) if "payload" in locals() else ""
-            if self.path == "/export-markdown":
+            if self.route_path == "/export-markdown":
                 result = ExportResult(ExportStatus.FAILED, session_id, str(exc))
                 self._send_json(result.to_dict(), status=400)
                 return
@@ -214,12 +307,86 @@ class _Handler(BaseHTTPRequestHandler):
         token = self.server.http_mutation_token
         return bool(token and self.headers.get("X-Codex-Session-Delete-Token") == token)
 
+    def _check_web_token(self) -> bool:
+        if not self.server.web_token:
+            return False
+        if self.client_address[0] in ("127.0.0.1", "::1"):
+            return True
+        headers = {k: v for k, v in self.headers.items()}
+        return validate_token(self.path, headers, self.server.web_token)
+
+    def _serve_thread_list(self) -> None:
+        db_path = self.server.db_path
+        if db_path is None or not db_path.exists():
+            self._send_json({"projects": {}, "ungrouped": []})
+            return
+        try:
+            with sqlite3.connect(str(db_path)) as db:
+                db.row_factory = sqlite3.Row
+                kind = None
+                for tbl in ("threads", "sessions"):
+                    try:
+                        db.execute(f"SELECT count(*) FROM {tbl}")
+                        kind = tbl
+                        break
+                    except sqlite3.OperationalError:
+                        continue
+                if kind == "threads":
+                    cols = {r[1] for r in db.execute("PRAGMA table_info(threads)").fetchall()}
+                    has_archived = "archived" in cols
+                    has_cwd = "cwd" in cols
+                    has_updated_ms = "updated_at_ms" in cols
+                    has_created_ms = "created_at_ms" in cols
+                    select = "SELECT id, title"
+                    if has_cwd:
+                        select += ", cwd"
+                    if has_updated_ms:
+                        select += ", updated_at_ms"
+                    if has_created_ms:
+                        select += ", created_at_ms"
+                    select += " FROM threads"
+                    if has_archived:
+                        select += " WHERE archived != 1"
+                    if has_updated_ms:
+                        select += " ORDER BY updated_at_ms DESC"
+                    elif has_created_ms:
+                        select += " ORDER BY created_at_ms DESC"
+                    rows = db.execute(select).fetchall()
+                elif kind == "sessions":
+                    rows = db.execute("SELECT id, title FROM sessions").fetchall()
+                else:
+                    rows = []
+        except Exception:
+            self._send_json({"projects": {}, "ungrouped": []})
+            return
+
+        projects: dict[str, list[dict[str, object]]] = {}
+        ungrouped: list[dict[str, object]] = []
+
+        for row in rows:
+            entry: dict[str, object] = {"id": row["id"], "title": row["title"] or ""}
+            if "cwd" in row.keys() and row["cwd"]:
+                entry["cwd"] = row["cwd"]
+            if "updated_at_ms" in row.keys() and row["updated_at_ms"]:
+                entry["updated_at_ms"] = row["updated_at_ms"]
+            if "created_at_ms" in row.keys() and row["created_at_ms"]:
+                entry["created_at_ms"] = row["created_at_ms"]
+            cwd = entry.get("cwd")
+            if cwd:
+                import os
+                label = os.path.basename(str(cwd)) or str(cwd)
+                projects.setdefault(label, []).append(entry)
+            else:
+                ungrouped.append(entry)
+
+        self._send_json({"projects": projects, "ungrouped": ungrouped})
+
     def _send_json(self, payload: dict[str, object], status: int = 200) -> None:
         data = json.dumps(payload).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type, X-Codex-Session-Delete-Token")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type, X-Codex-Session-Delete-Token, X-Web-Token")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
         self.send_header("Access-Control-Allow-Private-Network", "true")
         self.send_header("Content-Length", str(len(data)))

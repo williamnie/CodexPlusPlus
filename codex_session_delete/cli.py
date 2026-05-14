@@ -154,8 +154,10 @@ def run_launch(args: argparse.Namespace) -> int:
     except Exception as exc:
         log_launch_failure(exc)
         raise
-    print(f"Codex session delete helper running on http://127.0.0.1:{server.port}")
-    print("Keep this terminal open while using the delete buttons. Press Ctrl+C to stop.")
+    print(f"Codex session delete helper running on http://0.0.0.0:{server.port}", flush=True)
+    if server.web_token:
+        print(f"Remote Desktop: http://<your-ip>:{server.port}/remote/?token={server.web_token}", flush=True)
+    print("Keep this terminal open while using the delete buttons. Press Ctrl+C to stop.", flush=True)
     wait_for_shutdown(server, codex_proc)
     return 0
 

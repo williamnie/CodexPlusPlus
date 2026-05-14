@@ -14,6 +14,8 @@ class FakeServer:
         self.server_close_called = False
         self.bridge_socket = None
         self.cdp_websocket_url = None
+        self.web_token = "test-token"
+        self.db_path = None
 
     def inject_automation(self):
         return True
@@ -164,6 +166,27 @@ def test_cli_launch_subcommand_keeps_helper_server_alive_after_injection(monkeyp
     assert exit_code == 0
     assert waited == [57321]
     assert len(calls) == 1
+
+
+def test_cli_launch_prints_remote_desktop_url_before_waiting(monkeypatch, capsys):
+    events = []
+    monkeypatch.setattr(cli, "stop_existing_windows_launchers", lambda: None)
+    monkeypatch.setattr(cli, "maybe_print_update_notice", lambda: None)
+    monkeypatch.setattr(cli, "launch_and_inject", lambda *args: (FakeServer(), None))
+
+    def wait_for_shutdown(_server, _proc):
+        events.append(capsys.readouterr().out)
+
+    monkeypatch.setattr(cli, "wait_for_shutdown", wait_for_shutdown)
+
+    exit_code = cli.main(["launch"])
+
+    assert exit_code == 0
+    assert events == [
+        "Codex session delete helper running on http://0.0.0.0:57321\n"
+        "Remote Desktop: http://<your-ip>:57321/remote/?token=test-token\n"
+        "Keep this terminal open while using the delete buttons. Press Ctrl+C to stop.\n"
+    ]
 
 
 def test_cli_install_dispatches_to_platform_installer(monkeypatch, tmp_path):

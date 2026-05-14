@@ -280,8 +280,9 @@ def launch_codex_app(app_dir: Path, debug_port: int) -> Any:
     return subprocess.Popen(build_codex_command(app_dir, debug_port), env=env)
 
 
-def start_helper(service, export_service: MarkdownExportService | None = None, host: str = "127.0.0.1", port: int = 57321) -> HelperServer:
+def start_helper(service, export_service: MarkdownExportService | None = None, host: str = "0.0.0.0", port: int = 57321, web_token: str | None = None) -> HelperServer:
     server = InjectedHelperServer(host, port, service, export_service=export_service)
+    server.web_token = web_token
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     return server
@@ -323,6 +324,7 @@ def inject_with_retry(
 
 
 def launch_and_inject(app_dir: Path | None, db_path: Path | None, backup_dir: Path, debug_port: int, helper_port: int) -> tuple[HelperServer, Any]:
+    from codex_session_delete.remote_web import generate_web_token
     resolved_app_dir = resolve_codex_app_dir(app_dir)
     if resolved_app_dir is None:
         raise RuntimeError("Codex App directory not found")
@@ -335,7 +337,9 @@ def launch_and_inject(app_dir: Path | None, db_path: Path | None, backup_dir: Pa
     user_config_dir = user_scripts_config_dir()
     user_script_manager = UserScriptManager(builtin_user_scripts_dir, user_config_dir / "user_scripts", user_config_dir / "user_scripts.json")
     runtime = CodexPlusRuntime(None, user_script_manager, debug_port)
-    server = start_helper(service, export_service, port=helper_port)
+    web_token = generate_web_token()
+    server = start_helper(service, export_service, port=helper_port, web_token=web_token)
+    server.db_path = db_path
     codex_proc = None
     try:
         codex_proc = launch_codex_app(resolved_app_dir, debug_port)

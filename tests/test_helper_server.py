@@ -1,7 +1,10 @@
 import json
+import sqlite3
 import threading
 import urllib.error
 import urllib.request
+from pathlib import Path
+from unittest.mock import Mock
 
 from codex_session_delete.helper_server import HelperServer
 from codex_session_delete.models import DeleteResult, DeleteStatus, ExportResult, ExportStatus, SessionRef
@@ -48,6 +51,12 @@ def post_json(url, payload, headers=None):
     data = json.dumps(payload).encode("utf-8")
     request_headers = {"Content-Type": "application/json", **(headers or {})}
     request = urllib.request.Request(url, data=data, headers=request_headers, method="POST")
+    with urllib.request.urlopen(request, timeout=3) as response:
+        return json.loads(response.read().decode("utf-8"))
+
+
+def get_json(url, headers=None):
+    request = urllib.request.Request(url, headers=headers or {}, method="GET")
     with urllib.request.urlopen(request, timeout=3) as response:
         return json.loads(response.read().decode("utf-8"))
 
@@ -221,3 +230,115 @@ def test_helper_server_allows_private_network_preflight():
 
     assert private_network == "true"
     assert "X-Codex-Session-Delete-Token" in allow_headers
+    assert "X-Web-Token" in allow_headers
+
+
+
+def test_remote_client_uses_header_auth_without_query_tokens():
+    text = Path("codex_session_delete/static/app.js").read_text(encoding="utf-8")
+
+    assert '"X-Web-Token": TOKEN' in text
+    assert "new EventSource" not in text
+    assert "authUrl(" not in text
+    assert '"token=" +' not in text
+    assert 'params.delete("token")' in text
+    assert "window.history.replaceState" in text
+    assert 'fetch("/api/remote/threads", { headers: authHeaders() })' in text
+    assert 'fetch("/api/remote/dom-state", { headers: authHeaders()' in text
+
+
+def test_remote_threads_route_accepts_header_token(tmp_path):
+    db_path = tmp_path / "state.sqlite"
+    with sqlite3.connect(db_path) as db:
+        db.execute("CREATE TABLE sessions (id TEXT PRIMARY KEY, title TEXT)")
+        db.execute("INSERT INTO sessions VALUES (?, ?)", ("s1", "Header Token"))
+
+    service = FakeDeleteService()
+    server = HelperServer("127.0.0.1", 0, service)
+    server.web_token = "test-token"
+    server.db_path = db_path
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        data = get_json(f"http://127.0.0.1:{server.port}/api/remote/threads", {"X-Web-Token": "test-token"})
+    finally:
+        server.shutdown()
+        thread.join(timeout=3)
+
+    assert data["ungrouped"][0] == {"id": "s1", "title": "Header Token"}
+
+def test_remote_threads_route_accepts_token_query_string(tmp_path):
+    db_path = tmp_path / "state.sqlite"
+    with sqlite3.connect(db_path) as db:
+        db.execute(
+            "CREATE TABLE threads ("
+            "id TEXT PRIMARY KEY, title TEXT, cwd TEXT, archived INTEGER, "
+            "updated_at_ms INTEGER, created_at_ms INTEGER)"
+        )
+        db.execute(
+            "INSERT INTO threads VALUES (?, ?, ?, ?, ?, ?)",
+            ("t1", "First", "/workspace/project-a", 0, 1700000000000, 1699999999000),
+        )
+
+    service = FakeDeleteService()
+    server = HelperServer("127.0.0.1", 0, service)
+    server.web_token = "test-token"
+    server.db_path = db_path
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        data = get_json(f"http://127.0.0.1:{server.port}/api/remote/threads?token=test-token")
+    finally:
+        server.shutdown()
+        thread.join(timeout=3)
+
+    assert data["projects"]["project-a"][0]["id"] == "t1"
+
+
+def test_remote_post_route_accepts_token_query_string():
+    service = FakeDeleteService()
+    server = HelperServer("127.0.0.1", 0, service)
+    server.web_token = "test-token"
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        sent = post_json(f"http://127.0.0.1:{server.port}/api/remote/send?token=test-token", {"prompt": "hello"})
+    finally:
+        server.shutdown()
+        thread.join(timeout=3)
+
+    assert sent == {"ok": True, "id": "1"}
+
+
+
+def test_remote_new_chat_route_accepts_token_query_string():
+    service = FakeDeleteService()
+    server = HelperServer("127.0.0.1", 0, service)
+    server.web_token = "test-token"
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        result = post_json(f"http://127.0.0.1:{server.port}/api/remote/new-chat?token=test-token", {})
+    finally:
+        server.shutdown()
+        thread.join(timeout=3)
+
+    assert result == {"status": "cdp_unavailable"}
+
+def test_cdp_evaluate_returns_without_reentrant_lock_deadlock(monkeypatch):
+    service = FakeDeleteService()
+    server = HelperServer("127.0.0.1", 0, service)
+    server.cdp_websocket_url = "ws://codex-page"
+    socket = Mock()
+    socket.recv.return_value = json.dumps({"id": 1001, "result": {"result": {"value": {"status": "ok"}}}})
+    monkeypatch.setattr("codex_session_delete.helper_server.websocket.create_connection", lambda *args, **kwargs: socket)
+    result: dict[str, object] = {}
+
+    thread = threading.Thread(target=lambda: result.update(value=server.cdp_evaluate("1 + 1")), daemon=True)
+    thread.start()
+    thread.join(timeout=0.5)
+    try:
+        assert not thread.is_alive()
+        assert result["value"] == {"status": "ok"}
+    finally:
+        server.server_close()
