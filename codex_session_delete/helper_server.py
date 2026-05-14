@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import threading
 import urllib.parse
@@ -360,11 +361,14 @@ class _Handler(BaseHTTPRequestHandler):
             self._send_json({"projects": {}, "ungrouped": []})
             return
 
+        index_titles = self._session_index_thread_titles(db_path) if kind == "threads" else {}
         projects: dict[str, list[dict[str, object]]] = {}
         ungrouped: list[dict[str, object]] = []
 
         for row in rows:
-            entry: dict[str, object] = {"id": row["id"], "title": row["title"] or ""}
+            row_id = str(row["id"])
+            title = index_titles.get(row_id) or row["title"] or ""
+            entry: dict[str, object] = {"id": row_id, "title": title}
             if "cwd" in row.keys() and row["cwd"]:
                 entry["cwd"] = row["cwd"]
             if "updated_at_ms" in row.keys() and row["updated_at_ms"]:
@@ -373,13 +377,37 @@ class _Handler(BaseHTTPRequestHandler):
                 entry["created_at_ms"] = row["created_at_ms"]
             cwd = entry.get("cwd")
             if cwd:
-                import os
                 label = os.path.basename(str(cwd)) or str(cwd)
                 projects.setdefault(label, []).append(entry)
             else:
                 ungrouped.append(entry)
 
         self._send_json({"projects": projects, "ungrouped": ungrouped})
+
+    def _session_index_thread_titles(self, db_path: Path) -> dict[str, str]:
+        path = db_path.parent / "session_index.jsonl"
+        if not path.is_file():
+            return {}
+
+        titles: dict[str, str] = {}
+        try:
+            with path.open("r", encoding="utf-8") as handle:
+                for line in handle:
+                    if not line.strip():
+                        continue
+                    try:
+                        item = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if not isinstance(item, dict):
+                        continue
+                    thread_id = str(item.get("id") or "").strip()
+                    title = str(item.get("thread_name") or "").strip()
+                    if thread_id and title:
+                        titles[thread_id] = title
+        except OSError:
+            return {}
+        return titles
 
     def _send_json(self, payload: dict[str, object], status: int = 200) -> None:
         data = json.dumps(payload).encode("utf-8")

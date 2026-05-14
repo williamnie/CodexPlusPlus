@@ -295,6 +295,47 @@ def test_remote_threads_route_accepts_token_query_string(tmp_path):
     assert data["projects"]["project-a"][0]["id"] == "t1"
 
 
+def test_remote_threads_route_prefers_session_index_title_over_db_first_prompt(tmp_path):
+    db_path = tmp_path / "state.sqlite"
+    session_index_path = tmp_path / "session_index.jsonl"
+    session_index_path.write_text(
+        '{"id":"t1","thread_name":"修复远程线程标题","updated_at":"2026-05-14T06:09:54.027412Z"}\n',
+        encoding="utf-8",
+    )
+    with sqlite3.connect(db_path) as db:
+        db.execute(
+            "CREATE TABLE threads ("
+            "id TEXT PRIMARY KEY, title TEXT, cwd TEXT, archived INTEGER, "
+            "updated_at_ms INTEGER, created_at_ms INTEGER)"
+        )
+        db.execute(
+            "INSERT INTO threads VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                "t1",
+                "现在/api/remote/threads获取到的数据中的title不对，现在的title是用户说的第一句话，不是真正的title，修复下",
+                "/workspace/project-a",
+                0,
+                1700000000000,
+                1699999999000,
+            ),
+        )
+
+    service = FakeDeleteService()
+    server = HelperServer("127.0.0.1", 0, service)
+    server.web_token = "test-token"
+    server.db_path = db_path
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        data = get_json(f"http://127.0.0.1:{server.port}/api/remote/threads?token=test-token")
+    finally:
+        server.shutdown()
+        thread.join(timeout=3)
+
+    entry = data["projects"]["project-a"][0]
+    assert entry["title"] == "修复远程线程标题"
+
+
 def test_remote_post_route_accepts_token_query_string():
     service = FakeDeleteService()
     server = HelperServer("127.0.0.1", 0, service)
