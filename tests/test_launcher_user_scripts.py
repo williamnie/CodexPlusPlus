@@ -1,4 +1,4 @@
-from codex_session_delete.launcher import handle_bridge_request
+from codex_session_delete.launcher import CodexPlusRuntime, handle_bridge_request
 from codex_session_delete.models import ExportResult, ExportStatus
 from codex_session_delete.settings_store import SettingsStore
 from codex_session_delete.user_scripts import UserScriptManager
@@ -119,6 +119,66 @@ def test_handle_bridge_request_returns_ads(tmp_path):
     assert result["ads"][0]["id"] == "runtime-ad"
 
 
+def test_handle_bridge_request_serves_conversation_automation_queue(tmp_path):
+    manager = UserScriptManager(tmp_path / "builtin", tmp_path / "user", tmp_path / "config.json")
+    runtime = CodexPlusRuntime(
+        None,
+        manager,
+        helper_server=type("Server", (), {"pending_messages": [{"id": "1", "prompt": "hello"}]})(),
+    )
+
+    first = handle_bridge_request(FakeDeleteService(), FakeExportService(), "/api/pending", {}, runtime)
+    second = handle_bridge_request(FakeDeleteService(), FakeExportService(), "/api/pending", {}, runtime)
+
+    assert first == {"messages": [{"id": "1", "prompt": "hello"}]}
+    assert second == {"messages": []}
+
+
+def test_handle_bridge_request_stores_conversation_automation_result(tmp_path):
+    manager = UserScriptManager(tmp_path / "builtin", tmp_path / "user", tmp_path / "config.json")
+    stored = {}
+
+    class Server:
+        def store_result(self, msg_id, status, content):
+            stored.update({"id": msg_id, "status": status, "content": content})
+
+    runtime = CodexPlusRuntime(None, manager, helper_server=Server())
+
+    result = handle_bridge_request(
+        FakeDeleteService(),
+        FakeExportService(),
+        "/api/callback",
+        {"id": "1", "status": "success", "content": "done"},
+        runtime,
+    )
+
+    assert result == {"ok": True}
+    assert stored == {"id": "1", "status": "success", "content": "done"}
+
+
+def test_handle_bridge_request_accepts_dom_report_without_network_fetch(tmp_path):
+    manager = UserScriptManager(tmp_path / "builtin", tmp_path / "user", tmp_path / "config.json")
+    updates = []
+
+    class Store:
+        _state = {"web_active_thread": "t1"}
+
+        def update(self, payload):
+            updates.append(payload)
+
+    runtime = CodexPlusRuntime(None, manager, helper_server=type("Server", (), {"dom_state_store": Store()})())
+
+    result = handle_bridge_request(
+        FakeDeleteService(),
+        FakeExportService(),
+        "/api/dom-report",
+        {"active_thread_id": "t1", "messages": [{"role": "user", "content": "hi"}], "is_streaming": False},
+        runtime,
+    )
+
+    assert result == {"ok": True}
+    assert updates == [{"active_thread_id": "t1", "messages": [{"role": "user", "content": "hi"}], "is_streaming": False}]
+
 
 def test_handle_bridge_request_exports_markdown(tmp_path):
     manager = UserScriptManager(tmp_path / "builtin", tmp_path / "user", tmp_path / "config.json")
@@ -128,4 +188,3 @@ def test_handle_bridge_request_exports_markdown(tmp_path):
 
     assert exported["status"] == "exported"
     assert exported["filename"] == "thread.md"
-

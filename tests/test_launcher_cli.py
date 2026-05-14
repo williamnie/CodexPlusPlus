@@ -14,6 +14,8 @@ class FakeServer:
         self.server_close_called = False
         self.bridge_socket = None
         self.cdp_websocket_url = None
+        self.web_token = "test-token"
+        self.db_path = None
 
     def inject_automation(self):
         return True
@@ -164,6 +166,64 @@ def test_cli_launch_subcommand_keeps_helper_server_alive_after_injection(monkeyp
     assert exit_code == 0
     assert waited == [57321]
     assert len(calls) == 1
+
+
+def test_cli_launch_prints_remote_desktop_urls_before_waiting(monkeypatch, capsys):
+    events = []
+    monkeypatch.setattr(cli, "stop_existing_windows_launchers", lambda: None)
+    monkeypatch.setattr(cli, "maybe_print_update_notice", lambda: None)
+    monkeypatch.setattr(cli, "launch_and_inject", lambda *args: (FakeServer(), None))
+    monkeypatch.setattr(cli, "local_access_hosts", lambda: ["127.0.0.1", "192.168.1.23"])
+
+    def wait_for_shutdown(_server, _proc):
+        events.append(capsys.readouterr().out)
+
+    monkeypatch.setattr(cli, "wait_for_shutdown", wait_for_shutdown)
+
+    exit_code = cli.main(["launch"])
+
+    assert exit_code == 0
+    assert events == [
+        "Codex session delete helper running on http://0.0.0.0:57321\n"
+        "Remote Desktop URLs:\n"
+        "  Local: http://127.0.0.1:57321/remote/?token=test-token\n"
+        "  LAN:   http://192.168.1.23:57321/remote/?token=test-token\n"
+        "Keep this terminal open while using the delete buttons. Press Ctrl+C to stop.\n"
+    ]
+
+
+def test_local_access_hosts_includes_socket_detected_lan_ip(monkeypatch):
+    class FakeSocket:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def connect(self, _address):
+            return None
+
+        def getsockname(self):
+            return ("10.0.0.8", 52100)
+
+    monkeypatch.setattr(cli.socket, "socket", lambda *_args, **_kwargs: FakeSocket())
+    monkeypatch.setattr(cli.socket, "gethostbyname_ex", lambda _hostname: ("host", [], ["127.0.0.1", "10.0.0.9"]))
+    monkeypatch.setattr(cli.socket, "getaddrinfo", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(cli.socket, "gethostname", lambda: "host")
+    monkeypatch.setattr(cli, "_system_ipv4_hosts", lambda: [])
+
+    assert cli.local_access_hosts() == ["127.0.0.1", "10.0.0.8", "10.0.0.9"]
+
+
+def test_extract_system_ipv4_hosts_ignores_netmasks_and_broadcasts():
+    text = """
+lo0: flags=8049<UP,LOOPBACK,RUNNING,MULTICAST> mtu 16384
+    inet 127.0.0.1 netmask 0xff000000
+en0: flags=8863<UP,BROADCAST,SMART,RUNNING,SIMPLEX,MULTICAST> mtu 1500
+    inet 192.168.50.243 netmask 0xffffff00 broadcast 192.168.50.255
+    """
+
+    assert cli._extract_system_ipv4_hosts(text) == ["127.0.0.1", "192.168.50.243"]
 
 
 def test_cli_install_dispatches_to_platform_installer(monkeypatch, tmp_path):

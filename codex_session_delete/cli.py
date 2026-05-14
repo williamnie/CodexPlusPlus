@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import argparse
+import ipaddress
 import os
+import re
+import socket
 import subprocess
 import sys
 import traceback
@@ -12,6 +15,9 @@ from codex_session_delete.installers import InstallOptions, install_codex_plus_p
 from codex_session_delete.launcher import launch_and_inject, shutdown_helper
 from codex_session_delete import updater
 from codex_session_delete import watcher
+
+_IPV4_RE = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b")
+_INET_LINE_RE = re.compile(r"^\s*inet\s+(?:addr:)?((?:\d{1,3}\.){3}\d{1,3})(?:/|\s)", re.MULTILINE)
 
 
 def add_launch_arguments(parser: argparse.ArgumentParser) -> None:
@@ -146,6 +152,85 @@ def stop_existing_windows_launchers() -> None:
     subprocess.run(["powershell", "-NoProfile", "-Command", script], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env)
 
 
+def _append_access_host(hosts: list[str], candidate: str) -> None:
+    try:
+        ip = ipaddress.ip_address(candidate)
+    except ValueError:
+        return
+    if ip.version != 4 or ip.is_unspecified or ip.is_multicast:
+        return
+    if candidate == "255.255.255.255":
+        return
+    if candidate not in hosts:
+        hosts.append(candidate)
+
+
+def _routed_lan_host() -> str | None:
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+            sock.connect(("8.8.8.8", 80))
+            return str(sock.getsockname()[0])
+    except OSError:
+        return None
+
+
+def _hostname_ipv4_hosts() -> list[str]:
+    hosts: list[str] = []
+    try:
+        _name, _aliases, addresses = socket.gethostbyname_ex(socket.gethostname())
+        hosts.extend(str(address) for address in addresses)
+    except OSError:
+        pass
+    try:
+        infos = socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET)
+        hosts.extend(str(info[4][0]) for info in infos)
+    except OSError:
+        pass
+    return hosts
+
+
+def _extract_system_ipv4_hosts(text: str, *, windows: bool = False) -> list[str]:
+    if windows:
+        lines = (line for line in text.splitlines() if "IPv4" in line)
+        return [match.group(0) for line in lines for match in _IPV4_RE.finditer(line)]
+    return [match.group(1) for match in _INET_LINE_RE.finditer(text)]
+
+
+def _system_ipv4_hosts() -> list[str]:
+    if sys.platform == "win32":
+        commands = [["ipconfig"]]
+    elif sys.platform == "darwin":
+        commands = [["ifconfig"]]
+    else:
+        commands = [["ip", "-4", "addr", "show"], ["ifconfig"]]
+    hosts: list[str] = []
+    for command in commands:
+        try:
+            result = subprocess.run(command, capture_output=True, text=True, timeout=2, check=False)
+        except (OSError, subprocess.TimeoutExpired):
+            continue
+        for candidate in _extract_system_ipv4_hosts(result.stdout, windows=sys.platform == "win32"):
+            _append_access_host(hosts, candidate)
+    return hosts
+
+
+def local_access_hosts() -> list[str]:
+    hosts = ["127.0.0.1"]
+    routed_host = _routed_lan_host()
+    if routed_host is not None:
+        _append_access_host(hosts, routed_host)
+    for candidate in [*_hostname_ipv4_hosts(), *_system_ipv4_hosts()]:
+        _append_access_host(hosts, candidate)
+    return hosts
+
+
+def _print_remote_desktop_urls(port: int, token: str) -> None:
+    print("Remote Desktop URLs:", flush=True)
+    for host in local_access_hosts():
+        prefix = "  Local: " if host.startswith("127.") else "  LAN:   "
+        print(f"{prefix}http://{host}:{port}/remote/?token={token}", flush=True)
+
+
 def run_launch(args: argparse.Namespace) -> int:
     stop_existing_windows_launchers()
     maybe_print_update_notice()
@@ -154,8 +239,10 @@ def run_launch(args: argparse.Namespace) -> int:
     except Exception as exc:
         log_launch_failure(exc)
         raise
-    print(f"Codex session delete helper running on http://127.0.0.1:{server.port}")
-    print("Keep this terminal open while using the delete buttons. Press Ctrl+C to stop.")
+    print(f"Codex session delete helper running on http://0.0.0.0:{server.port}", flush=True)
+    if server.web_token:
+        _print_remote_desktop_urls(server.port, server.web_token)
+    print("Keep this terminal open while using the delete buttons. Press Ctrl+C to stop.", flush=True)
     wait_for_shutdown(server, codex_proc)
     return 0
 

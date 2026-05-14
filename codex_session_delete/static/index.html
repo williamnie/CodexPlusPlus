@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>Codex++ Remote</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/marked/12.0.1/marked.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+</head>
+<body>
+  <div id="loginGate" class="login-gate" style="display:none">
+    <div class="login-box">
+      <h2>Codex++ Remote</h2>
+      <p>Enter access token</p>
+      <input type="text" id="tokenInput" placeholder="Token" autocomplete="off">
+      <button id="loginBtn" class="btn-primary">Connect</button>
+    </div>
+  </div>
+
+  <div id="app" class="app-layout">
+    <aside id="sidebar" class="sidebar">
+      <div class="sidebar-header">
+        <h1 class="sidebar-title">Codex++</h1>
+        <button id="newChatBtn" class="btn-icon" title="New Chat">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+        </button>
+      </div>
+      <div id="selectedProject" class="selected-project" style="display:none">
+        <span class="selected-project-label">Project:</span>
+        <span id="selectedProjectName" class="selected-project-name"></span>
+        <button id="clearProjectBtn" class="btn-clear-project" title="Clear selection">&times;</button>
+      </div>
+      <div class="sidebar-search">
+        <input type="text" id="searchInput" placeholder="Search..." autocomplete="off">
+      </div>
+      <div id="threadList" class="thread-list"></div>
+    </aside>
+
+    <main id="chatArea" class="chat-area">
+      <div id="chatHeader" class="chat-header">
+        <button id="sidebarToggle" class="btn-icon sidebar-toggle">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
+        </button>
+        <span id="chatTitle" class="chat-title">Select a conversation</span>
+        <div class="header-actions">
+          <span id="connectionDot" class="conn-dot"></span>
+          <button id="refreshBtn" class="btn-icon" title="Refresh">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+          </button>
+        </div>
+      </div>
+
+      <div id="messageList" class="message-list">
+        <div class="empty-state">
+          <p>Select a conversation from the sidebar or start a new chat</p>
+        </div>
+      </div>
+
+      <div id="inputArea" class="input-area">
+        <textarea id="promptInput" placeholder="Type a message..." rows="1"></textarea>
+        <button id="sendBtn" class="btn-send" disabled>
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/></svg>
+        </button>
+      </div>
+    </main>
+  </div>
+
+  <div id="sidebarOverlay" class="sidebar-overlay"></div>
+  <script src="/static/app.js"></script>
+</body>
+</html>
