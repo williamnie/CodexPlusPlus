@@ -224,6 +224,34 @@ def test_launch_and_inject_returns_windows_packaged_process_id(monkeypatch, tmp_
     assert proc == 1234
 
 
+def test_launch_and_inject_runs_provider_sync_before_launch_when_enabled(monkeypatch, tmp_path):
+    events = []
+    monkeypatch.setattr(launcher, "resolve_codex_app_dir", lambda app_dir=None: tmp_path)
+    monkeypatch.setattr(launcher, "start_helper", lambda *args, **kwargs: FakeServer())
+    monkeypatch.setattr(launcher, "inject_with_retry", lambda *args, **kwargs: {"result": {}})
+    monkeypatch.setattr(launcher, "backend_settings", lambda: type("Settings", (), {"provider_sync_enabled": True})())
+    monkeypatch.setattr(launcher, "run_provider_sync", lambda: events.append("sync") or type("Result", (), {"status": "synced", "message": "ok"})())
+    monkeypatch.setattr(launcher, "launch_codex_app", lambda *args: events.append("launch") or 1234)
+
+    launcher.launch_and_inject(None, None, tmp_path / "backups", 9229, 57321)
+
+    assert events == ["sync", "launch"]
+
+
+def test_launch_and_inject_skips_provider_sync_when_disabled(monkeypatch, tmp_path):
+    events = []
+    monkeypatch.setattr(launcher, "resolve_codex_app_dir", lambda app_dir=None: tmp_path)
+    monkeypatch.setattr(launcher, "start_helper", lambda *args, **kwargs: FakeServer())
+    monkeypatch.setattr(launcher, "inject_with_retry", lambda *args, **kwargs: {"result": {}})
+    monkeypatch.setattr(launcher, "backend_settings", lambda: type("Settings", (), {"provider_sync_enabled": False})())
+    monkeypatch.setattr(launcher, "run_provider_sync", lambda: (_ for _ in ()).throw(AssertionError("sync should not run")))
+    monkeypatch.setattr(launcher, "launch_codex_app", lambda *args: events.append("launch") or 1234)
+
+    launcher.launch_and_inject(None, None, tmp_path / "backups", 9229, 57321)
+
+    assert events == ["launch"]
+
+
 def test_launch_and_inject_closes_helper_when_injection_fails(monkeypatch, tmp_path):
     server = FakeServer()
     monkeypatch.setattr(launcher, "resolve_codex_app_dir", lambda app_dir=None: tmp_path)

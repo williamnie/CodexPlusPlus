@@ -1,3 +1,4 @@
+import sys
 from pathlib import Path
 
 from codex_session_delete.installers import InstallOptions
@@ -45,7 +46,9 @@ def test_default_windows_launcher_uses_current_python_executable(tmp_path):
     assert "$Python = " not in script
     assert "Get-Command python" not in script
     assert "-m codex_session_delete launch" in script
-    assert "pythonw.exe" in script or "python.exe" in script
+    pythonw = Path(sys.executable).with_name("pythonw.exe")
+    expected_python = pythonw if pythonw.exists() else Path(sys.executable)
+    assert str(expected_python) in script
 
 
 def test_build_uninstall_shortcut_script_removes_codex_plus_shortcuts(tmp_path):

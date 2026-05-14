@@ -1,5 +1,6 @@
 from codex_session_delete.launcher import handle_bridge_request
 from codex_session_delete.models import ExportResult, ExportStatus
+from codex_session_delete.settings_store import SettingsStore
 from codex_session_delete.user_scripts import UserScriptManager
 
 
@@ -25,6 +26,7 @@ class FakeRuntime:
         self.injected = []
         self.devtools_opened = False
         self.repaired = False
+        self.ads_payload = {"version": 1, "ads": [{"id": "runtime-ad", "type": "normal", "title": "Runtime Ad", "description": "Loaded", "url": "https://0029.org", "highlights": []}]}
 
     def reload_user_scripts(self):
         bundle = self.user_scripts.build_enabled_bundle()
@@ -41,6 +43,9 @@ class FakeRuntime:
     def repair_backend(self):
         self.repaired = True
         return {"status": "ok", "message": "后端已修复"}
+
+    def ads(self):
+        return self.ads_payload
 
 
 def test_handle_bridge_request_lists_user_scripts(tmp_path):
@@ -79,6 +84,40 @@ def test_handle_bridge_request_reports_and_repairs_backend_status(tmp_path):
     assert status == {"status": "ok", "message": "后端已连接"}
     assert runtime.repaired is True
     assert repaired == {"status": "ok", "message": "后端已修复"}
+
+
+def test_handle_bridge_request_gets_backend_settings(monkeypatch, tmp_path):
+    store = SettingsStore(tmp_path / "settings.json")
+    store.update({"providerSyncEnabled": True})
+    monkeypatch.setattr("codex_session_delete.launcher.SettingsStore", lambda: store)
+    manager = UserScriptManager(tmp_path / "builtin", tmp_path / "user", tmp_path / "config.json")
+    runtime = FakeRuntime(manager)
+
+    result = handle_bridge_request(FakeDeleteService(), FakeExportService(), "/settings/get", {}, runtime)
+
+    assert result == {"providerSyncEnabled": True}
+
+
+def test_handle_bridge_request_sets_backend_settings(monkeypatch, tmp_path):
+    store = SettingsStore(tmp_path / "settings.json")
+    monkeypatch.setattr("codex_session_delete.launcher.SettingsStore", lambda: store)
+    manager = UserScriptManager(tmp_path / "builtin", tmp_path / "user", tmp_path / "config.json")
+    runtime = FakeRuntime(manager)
+
+    result = handle_bridge_request(FakeDeleteService(), FakeExportService(), "/settings/set", {"providerSyncEnabled": True}, runtime)
+
+    assert result == {"providerSyncEnabled": True}
+    assert store.load().provider_sync_enabled is True
+
+
+def test_handle_bridge_request_returns_ads(tmp_path):
+    manager = UserScriptManager(tmp_path / "builtin", tmp_path / "user", tmp_path / "config.json")
+    runtime = FakeRuntime(manager)
+
+    result = handle_bridge_request(FakeDeleteService(), FakeExportService(), "/ads", {}, runtime)
+
+    assert result["ads"][0]["id"] == "runtime-ad"
+
 
 
 def test_handle_bridge_request_exports_markdown(tmp_path):

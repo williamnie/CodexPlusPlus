@@ -144,6 +144,23 @@ def test_install_bridge_enables_runtime_before_adding_binding(monkeypatch):
     assert ws.sent[5]["params"]["source"] == "window.__codexPlusTest = true;"
 
 
+def test_inject_file_exposes_packaged_sponsor_images_as_data_uris(monkeypatch, tmp_path):
+    script_path = tmp_path / "renderer.js"
+    script_path.write_text("window.__rendererLoaded = true;", encoding="utf-8")
+    captured = {}
+
+    monkeypatch.setattr(cdp, "list_targets", lambda port: [{"type": "page", "title": "Codex", "url": "app://codex", "webSocketDebuggerUrl": "ws://page"}])
+    monkeypatch.setattr(cdp, "install_bridge", lambda websocket_url, binding_name, handler, scripts: captured.setdefault("new_document", scripts[0]) or object())
+    monkeypatch.setattr(cdp, "evaluate_script", lambda websocket_url, script: captured.setdefault("evaluated", script) or {"result": {}})
+
+    cdp.inject_file(9229, script_path, 57321, lambda path, payload: {})
+
+    assert "window.__CODEX_PLUS_SPONSOR_IMAGES__" in captured["evaluated"]
+    assert '"alipay": "data:image/jpeg;base64,' in captured["evaluated"]
+    assert '"wechat": "data:image/jpeg;base64,' in captured["evaluated"]
+    assert captured["new_document"] == captured["evaluated"]
+
+
 def test_open_devtools_opens_chrome_devtools_frontend(monkeypatch):
     targets = [{"type": "page", "title": "Codex", "url": "app://codex", "id": "page-1", "webSocketDebuggerUrl": "ws://page"}]
     opened = []

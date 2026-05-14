@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import base64
 import json
 import threading
 import webbrowser
 from dataclasses import dataclass
+from importlib import resources
 from pathlib import Path
 from typing import Callable
 
@@ -140,12 +142,23 @@ def install_bridge(websocket_url: str, binding_name: str, handler: BridgeHandler
     return ws
 
 
+def sponsor_image_data_uris() -> dict[str, str]:
+    assets = resources.files("codex_session_delete").joinpath("assets")
+    return {
+        "alipay": "data:image/jpeg;base64," + base64.b64encode(assets.joinpath("sponsor-alipay.jpg").read_bytes()).decode("ascii"),
+        "wechat": "data:image/jpeg;base64," + base64.b64encode(assets.joinpath("sponsor-wechat.jpg").read_bytes()).decode("ascii"),
+    }
+
+
 def inject_file(port: int, script_path: Path, helper_port: int, handler: BridgeHandler | None = None) -> InjectionResult:
     targets = list_targets(port)
     target = pick_page_target(targets)
     websocket_url = str(target["webSocketDebuggerUrl"])
     script = script_path.read_text(encoding="utf-8")
-    prefix = f"window.__CODEX_SESSION_DELETE_HELPER__ = 'http://127.0.0.1:{helper_port}';\n"
+    prefix = (
+        f"window.__CODEX_SESSION_DELETE_HELPER__ = 'http://127.0.0.1:{helper_port}';\n"
+        f"window.__CODEX_PLUS_SPONSOR_IMAGES__ = {json.dumps(sponsor_image_data_uris())};\n"
+    )
     full_script = prefix + script
     bridge_socket = install_bridge(websocket_url, BRIDGE_BINDING_NAME, handler, [full_script]) if handler else None
     if not bridge_socket:

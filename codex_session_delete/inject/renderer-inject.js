@@ -12,6 +12,9 @@
   const timelineTooltipClass = "codex-conversation-timeline-tooltip";
   const timelineTargetClass = "codex-conversation-timeline-target";
   const timelineQuestionLimit = 40;
+  const timelineMinTopPercent = 2;
+  const timelineMaxTopPercent = 98;
+  const timelineMaxMarkerGapPercent = 3.5;
   const projectMoveProjectionKey = "codexProjectMoveProjection";
   const legacyProjectMoveOverridesKey = "codexProjectMoveOverrides";
   const projectMoveProjectionTtlMs = 24 * 60 * 60 * 1000;
@@ -20,7 +23,7 @@
   const chatsSortRefreshIntervalMs = 1500;
   const chatsSortDbRefreshIntervalMs = 5000;
   const styleId = "codex-delete-style";
-  const codexDeleteStyleVersion = "7";
+  const codexDeleteStyleVersion = "8";
   const codexPlusMenuId = "codex-plus-menu";
   const codexPlusMenuFloatingClass = "codex-plus-menu-floating";
   const codexDeleteVersion = "6";
@@ -29,8 +32,8 @@
   const codexActionGroupVersion = "2";
   const codexArchiveRowActionsVersion = "1";
   const codexArchiveDeleteAllVersion = "2";
-  const codexConversationTimelineVersion = "1";
-  const codexPlusVersion = "1.0.5";
+  const codexConversationTimelineVersion = "2";
+  const codexPlusVersion = "1.0.7";
   const codexPlusSettingsKey = "codexPlusSettings";
   window.__codexProjectMoveRuntimeId = (window.__codexProjectMoveRuntimeId || 0) + 1;
   const codexProjectMoveRuntimeId = window.__codexProjectMoveRuntimeId;
@@ -38,6 +41,7 @@
   clearTimeout(window.__codexProjectMoveChatsSortTimer);
   window.__codexProjectMoveProjectionTimer = null;
   window.__codexProjectMoveChatsSortTimer = null;
+  window.__codexConversationTimelineNodeCounter = window.__codexConversationTimelineNodeCounter || 0;
   const selectors = {
     sidebarThread: "[data-app-action-sidebar-thread-id]",
     threadTitle: "[data-thread-title]",
@@ -281,6 +285,7 @@
         pointer-events: auto;
         -webkit-app-region: no-drag;
       }
+      .codex-plus-modal-content[data-codex-plus-active-tab="support"] { width: min(820px, calc(100vw - 48px)); }
       .codex-plus-modal-header {
         display: flex;
         align-items: center;
@@ -380,6 +385,23 @@
       .codex-plus-user-script-error { margin-top: 2px; color: #f87171; font-size: 11px; word-break: break-all; }
       .codex-plus-user-script-actions { display: grid; justify-items: end; gap: 8px; min-width: 120px; }
       .codex-plus-user-script-reload { border: 1px solid rgba(255,255,255,.18); border-radius: 7px; background: #3f3f46; color: #f3f4f6; font: 12px system-ui, sans-serif; padding: 6px 8px; }
+      .codex-plus-sponsor-text { color: #d1d5db; font-size: 13px; line-height: 1.55; margin: 4px 0 12px; }
+      .codex-plus-ad-section { display: grid; gap: 10px; margin-top: 12px; }
+      .codex-plus-ad-section:first-of-type { margin-top: 0; }
+      .codex-plus-ad-section-title { color: #f8fafc; font-size: 15px; margin: 0; }
+      .codex-plus-ad-list { display: grid; gap: 14px; }
+      .codex-plus-ad-card { border: 1px solid rgba(96,165,250,.26); border-radius: 16px; background: linear-gradient(135deg, rgba(37,99,235,.18), rgba(255,255,255,.05)); box-shadow: 0 14px 36px rgba(0,0,0,.22); }
+      .codex-plus-ad-content { padding: 14px; }
+      .codex-plus-ad-title { margin: 0; color: #f8fafc; font-size: 17px; line-height: 1.35; }
+      .codex-plus-ad-description { margin: 6px 0 10px; color: #dbeafe; font-size: 13px; line-height: 1.55; }
+      .codex-plus-ad-highlights { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 12px; }
+      .codex-plus-ad-highlights span { border: 1px solid rgba(255,255,255,.14); border-radius: 999px; background: rgba(255,255,255,.08); color: #f3f4f6; font-size: 12px; padding: 4px 8px; }
+      .codex-plus-ad-link { display: inline-flex; align-items: center; justify-content: center; border-radius: 9px; background: #2563eb; color: #ffffff; font-size: 13px; font-weight: 650; text-decoration: none; padding: 8px 12px; }
+      .codex-plus-ad-empty { border: 1px dashed rgba(255,255,255,.16); border-radius: 12px; color: #9ca3af; font-size: 13px; padding: 12px; text-align: center; }
+      .codex-plus-sponsor-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+      .codex-plus-sponsor-card { border: 1px solid rgba(255,255,255,.1); border-radius: 12px; padding: 10px; background: rgba(255,255,255,.04); text-align: center; }
+      .codex-plus-sponsor-card-title { color: #f3f4f6; font-size: 13px; margin-bottom: 8px; }
+      .codex-plus-sponsor-qr { display: block; width: 100%; max-width: 340px; border-radius: 8px; margin: 0 auto; background: white; }
       .${timelineClass} {
         position: fixed;
         top: calc(72px + 12px);
@@ -422,7 +444,10 @@
         position: absolute;
         right: 20px;
         top: 50%;
-        max-width: 260px;
+        display: block;
+        box-sizing: border-box;
+        width: max-content;
+        max-width: min(320px, calc(100vw - 72px));
         transform: translateY(-50%);
         border-radius: 8px;
         background: rgba(80, 80, 80, .92);
@@ -431,6 +456,8 @@
         line-height: 18px;
         padding: 10px 12px;
         white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
         box-shadow: 0 8px 24px rgba(0, 0, 0, .18);
         opacity: 0;
         visibility: hidden;
@@ -476,6 +503,36 @@
     document.querySelectorAll(".codex-plus-toggle[data-codex-plus-setting]").forEach((button) => {
       const key = button.getAttribute("data-codex-plus-setting");
       button.dataset.enabled = String(!!codexPlusSettings()[key]);
+    });
+  }
+
+  let codexPlusBackendSettings = { providerSyncEnabled: false };
+
+  async function loadBackendSettings() {
+    try {
+      const settings = await postJson("/settings/get", {});
+      codexPlusBackendSettings = { ...codexPlusBackendSettings, ...settings };
+      refreshCodexPlusBackendToggles();
+    } catch (_) {
+      refreshCodexPlusBackendToggles();
+    }
+  }
+
+  async function setBackendSetting(key, value) {
+    codexPlusBackendSettings = { ...codexPlusBackendSettings, [key]: value };
+    refreshCodexPlusBackendToggles();
+    try {
+      const settings = await postJson("/settings/set", { [key]: value });
+      codexPlusBackendSettings = { ...codexPlusBackendSettings, ...settings };
+    } finally {
+      refreshCodexPlusBackendToggles();
+    }
+  }
+
+  function refreshCodexPlusBackendToggles() {
+    document.querySelectorAll(".codex-plus-toggle[data-codex-backend-setting]").forEach((button) => {
+      const key = button.getAttribute("data-codex-backend-setting");
+      button.dataset.enabled = String(!!codexPlusBackendSettings[key]);
     });
   }
 
@@ -561,7 +618,79 @@
     }
   }
 
+  const codexPlusAdsUrl = "/ads";
+  let codexPlusAds = [];
+  let codexPlusAdsLoaded = false;
+
+  function isCodexPlusAdExpired(ad) {
+    if (!ad.expires_at) return false;
+    const expiresAt = Date.parse(ad.expires_at);
+    return Number.isFinite(expiresAt) && expiresAt < Date.now();
+  }
+
+  function normalizeCodexPlusAds(payload) {
+    if (!payload || !Array.isArray(payload.ads)) return [];
+    return payload.ads.filter((ad) => {
+      return ad && ["sponsor", "normal"].includes(ad.type) && ad.title && ad.description && ad.url && !isCodexPlusAdExpired(ad);
+    }).map((ad) => ({
+      id: String(ad.id || ad.title),
+      type: ad.type,
+      title: String(ad.title),
+      description: String(ad.description),
+      url: String(ad.url),
+      expires_at: ad.expires_at ? String(ad.expires_at) : "",
+      highlights: Array.isArray(ad.highlights) ? ad.highlights.map((item) => String(item)).filter(Boolean) : [],
+    }));
+  }
+
+  function renderCodexPlusAdGroup(type, emptyText) {
+    const ads = codexPlusAds.filter((ad) => ad.type === type);
+    if (!ads.length) return `<div class="codex-plus-ad-empty">${escapeHtml(emptyText)}</div>`;
+    return ads.map((ad) => `
+      <article class="codex-plus-ad-card">
+        <div class="codex-plus-ad-content">
+          <h3 class="codex-plus-ad-title">${escapeHtml(ad.title)}</h3>
+          <p class="codex-plus-ad-description">${escapeHtml(ad.description)}</p>
+          <div class="codex-plus-ad-highlights">
+            ${ad.highlights.map((item) => `<span>${escapeHtml(item)}</span>`).join("")}
+          </div>
+          <a class="codex-plus-ad-link" href="${escapeHtml(ad.url)}" target="_blank" rel="noreferrer">访问 ${escapeHtml(new URL(ad.url).hostname)}</a>
+        </div>
+      </article>
+    `).join("");
+  }
+
+  function renderCodexPlusAds() {
+    if (!codexPlusAdsLoaded) return `<div class="codex-plus-ad-empty">推荐内容加载中…</div>`;
+    if (!codexPlusAds.length) return `<div class="codex-plus-ad-empty">暂无推荐内容。</div>`;
+    return `
+      <section class="codex-plus-ad-section">
+        <h3 class="codex-plus-ad-section-title">赞助商推荐</h3>
+        <div class="codex-plus-ad-list">${renderCodexPlusAdGroup("sponsor", "暂无赞助商推荐。")}</div>
+      </section>
+      <section class="codex-plus-ad-section">
+        <h3 class="codex-plus-ad-section-title">普通推荐</h3>
+        <div class="codex-plus-ad-list">${renderCodexPlusAdGroup("normal", "暂无普通推荐。")}</div>
+      </section>
+    `;
+  }
+
+  async function fetchCodexPlusAds() {
+    try {
+      codexPlusAds = normalizeCodexPlusAds(await postJson("/ads", {}));
+    } catch (_) {
+      codexPlusAds = [];
+    } finally {
+      codexPlusAdsLoaded = true;
+      const panel = document.querySelector('[data-codex-plus-panel="sponsor"] .codex-plus-ad-remote');
+      if (panel) panel.innerHTML = renderCodexPlusAds();
+    }
+  }
+
   function selectCodexPlusTab(tab) {
+    document.querySelectorAll(".codex-plus-modal-content").forEach((modal) => {
+      modal.dataset.codexPlusActiveTab = tab;
+    });
     document.querySelectorAll("[data-codex-plus-tab]").forEach((button) => {
       button.dataset.active = String(button.getAttribute("data-codex-plus-tab") === tab);
     });
@@ -585,6 +714,8 @@
         <div class="codex-plus-tabs" role="tablist" aria-label="Codex++">
           <button type="button" class="codex-plus-tab-button" data-codex-plus-tab="home" data-active="true">主页</button>
           <button type="button" class="codex-plus-tab-button" data-codex-plus-tab="userScripts" data-active="false">用户脚本</button>
+          <button type="button" class="codex-plus-tab-button" data-codex-plus-tab="sponsor" data-active="false">推荐内容</button>
+          <button type="button" class="codex-plus-tab-button" data-codex-plus-tab="support" data-active="false">请作者喝咖啡</button>
         </div>
         <div class="codex-plus-modal-body">
           <div class="codex-plus-panel" data-codex-plus-panel="home">
@@ -620,6 +751,10 @@
               <button type="button" class="codex-plus-toggle" data-codex-plus-setting="conversationTimeline"><span></span></button>
             </div>
             <div class="codex-plus-row">
+              <div><div class="codex-plus-row-title">Provider 同步</div><div class="codex-plus-row-description">切换供应商（model_provider）时不丢任何历史会话，避免历史对话因为供应商切换而消失。</div></div>
+              <button type="button" class="codex-plus-toggle" data-codex-backend-setting="providerSyncEnabled"><span></span></button>
+            </div>
+            <div class="codex-plus-row">
               <div><div class="codex-plus-row-title">原生菜单栏位置</div><div class="codex-plus-row-description">把 Codex++ 菜单插入顶部原生菜单栏；默认关闭以避免页面重渲染冲突。</div></div>
               <button type="button" class="codex-plus-toggle" data-codex-plus-setting="nativeMenuPlacement"><span></span></button>
             </div>
@@ -647,6 +782,25 @@
               <div class="codex-plus-user-script-actions">
                 <button type="button" class="codex-plus-toggle" data-codex-user-scripts-enabled="true"><span></span></button>
                 <button type="button" class="codex-plus-user-script-reload" data-codex-user-scripts-reload="true">重新加载用户脚本</button>
+              </div>
+            </div>
+          </div>
+          <div class="codex-plus-panel" data-codex-plus-panel="sponsor" hidden>
+            <div class="codex-plus-sponsor-text">推荐内容分为赞助商推荐和普通推荐。赞助商推荐来自支持 Codex++ 继续维护的合作方；普通推荐用于展示适合 Codex 用户的服务与信息。</div>
+            <div class="codex-plus-ad-remote">
+              ${renderCodexPlusAds()}
+            </div>
+          </div>
+          <div class="codex-plus-panel" data-codex-plus-panel="support" hidden>
+            <div class="codex-plus-sponsor-text">如果 Codex++ 帮到了你，可以请我喝杯咖啡，或者随手赞赏支持一下继续维护。</div>
+            <div class="codex-plus-sponsor-grid">
+              <div class="codex-plus-sponsor-card">
+                <div class="codex-plus-sponsor-card-title">支付宝</div>
+                <img class="codex-plus-sponsor-qr" src="${window.__CODEX_PLUS_SPONSOR_IMAGES__?.alipay || `${helperBase}/assets/sponsor-alipay.jpg`}" alt="支付宝赞赏码">
+              </div>
+              <div class="codex-plus-sponsor-card">
+                <div class="codex-plus-sponsor-card-title">微信</div>
+                <img class="codex-plus-sponsor-qr" src="${window.__CODEX_PLUS_SPONSOR_IMAGES__?.wechat || `${helperBase}/assets/sponsor-wechat.jpg`}" alt="微信赞赏码">
               </div>
             </div>
           </div>
@@ -699,13 +853,25 @@
         return;
       }
       const toggle = target?.closest("[data-codex-plus-setting]");
-      if (!toggle) return;
-      const key = toggle.getAttribute("data-codex-plus-setting");
-      setCodexPlusSetting(key, !codexPlusSettings()[key]);
+      if (toggle) {
+        const key = toggle.getAttribute("data-codex-plus-setting");
+        setCodexPlusSetting(key, !codexPlusSettings()[key]);
+        return;
+      }
+      const backendToggle = target?.closest("[data-codex-backend-setting]");
+      if (backendToggle) {
+        const key = backendToggle.getAttribute("data-codex-backend-setting");
+        setBackendSetting(key, !codexPlusBackendSettings[key]);
+        return;
+      }
     }, true);
     document.body.appendChild(overlay);
+    if (!codexPlusAdsLoaded) fetchCodexPlusAds();
+    selectCodexPlusTab("home");
     renderCodexPlusMenu();
+    refreshCodexPlusBackendToggles();
     renderBackendStatus();
+    loadBackendSettings();
     loadUserScripts();
   }
 
@@ -752,14 +918,32 @@
     }
   }
 
+  function headerTitleRegion(header) {
+    const candidates = Array.from(header?.querySelectorAll?.('[data-state], [class*="truncate"], [class*="text-base"]') || []);
+    return candidates.find((node) => {
+      if (!node?.querySelector?.('[data-state], button')) return false;
+      if (!node.textContent?.trim()) return false;
+      return node.closest?.(".draggable") || node.closest?.('[class*="grid-cols-[minmax(0,1fr)]"]');
+    }) || null;
+  }
+
+  function isHeaderToolbarButton(button, header, rect) {
+    if (!button || button.closest?.(`#${codexPlusMenuId}`)) return false;
+    if (!(rect.width > 0 && rect.height > 0 && rect.left > window.innerWidth / 2)) return false;
+    const buttonCluster = button.closest(".ms-auto.flex.shrink-0.items-center");
+    if (buttonCluster && header?.contains(buttonCluster)) return true;
+    const titleRegion = headerTitleRegion(header);
+    if (titleRegion?.contains?.(button)) return false;
+    return !!button.closest?.('[class*="ms-auto"][class*="shrink-0"][class*="items-center"]');
+  }
+
   function updateFloatingCodexPlusMenuPosition(menu) {
     if (!menu?.classList?.contains(codexPlusMenuFloatingClass)) return;
     const header = document.querySelector(selectors.appHeader) || document.querySelector("header");
     if (!header) return;
     const toolbarButtons = Array.from(header.querySelectorAll("button"))
-      .filter((button) => !button.closest(`#${codexPlusMenuId}`))
       .map((button) => ({ button, rect: button.getBoundingClientRect() }))
-      .filter(({ rect }) => rect.width > 0 && rect.height > 0 && rect.left > window.innerWidth / 2)
+      .filter(({ button, rect }) => isHeaderToolbarButton(button, header, rect))
       .sort((left, right) => left.rect.left - right.rect.left);
     const anchor = toolbarButtons[0];
     if (anchor) {
@@ -2384,12 +2568,42 @@
 
   function truncateTimelineQuestion(text) {
     const normalized = String(text || "").replace(/\s+/g, " ").trim();
-    if (normalized.length <= timelineQuestionLimit) return normalized;
-    return `${normalized.slice(0, timelineQuestionLimit)}…`;
+    const chars = Array.from(normalized);
+    if (chars.length <= timelineQuestionLimit) return normalized;
+    return `${chars.slice(0, timelineQuestionLimit).join("")}…`;
   }
 
   function conversationTimelineRoot() {
     return document.querySelector(".thread-scroll-container") || document.querySelector("main") || document.querySelector('[role="main"]');
+  }
+
+  function timelineQuestionSelector() {
+    return [
+      '[data-message-author-role="user"]',
+      '[data-testid="conversation-turn"][data-message-author-role="user"]',
+      '[data-testid="conversation-turn"] [data-message-author-role="user"]',
+      '[class*="user-message"]',
+      '[class*="UserMessage"]',
+    ].join(", ");
+  }
+
+  function nodeOrAncestorLooksLikeCodexUserBubble(node) {
+    if (node.nodeType !== 1) return false;
+    const className = String(node.className || "");
+    if (className.includes("bg-token-foreground/5") && node.parentElement?.classList?.contains("items-end")) return true;
+    const bubble = node.closest?.("[class*='bg-token-foreground/5']");
+    return !!bubble?.parentElement?.classList?.contains("items-end");
+  }
+
+  function nodeLooksLikeCodexUserBubble(node) {
+    if (nodeOrAncestorLooksLikeCodexUserBubble(node)) return true;
+    return !!node.querySelector?.(".group.flex.w-full.flex-col.items-end.justify-end.gap-1 > [class*='bg-token-foreground/5']");
+  }
+
+  function nodeLooksLikeTimelineQuestion(node) {
+    if (node.nodeType !== 1 || isExtensionUiNode(node)) return false;
+    const questionSelector = timelineQuestionSelector();
+    return !!node.matches?.(questionSelector) || !!node.closest?.(questionSelector) || !!node.querySelector?.(questionSelector) || nodeLooksLikeCodexUserBubble(node);
   }
 
   function conversationTimelineQuestionCandidates(root) {
@@ -2412,6 +2626,22 @@
     return clone.textContent.replace(/\s+/g, " ").trim();
   }
 
+  function timelineNodeId(node) {
+    if (!node.__codexConversationTimelineNodeId) {
+      window.__codexConversationTimelineNodeCounter += 1;
+      node.__codexConversationTimelineNodeId = String(window.__codexConversationTimelineNodeCounter);
+    }
+    return node.__codexConversationTimelineNodeId;
+  }
+
+  function visibleTimelineNode(node) {
+    if (!node.isConnected) return false;
+    const style = getComputedStyle(node);
+    if (style.display === "none" || style.visibility === "hidden") return false;
+    const rect = node.getBoundingClientRect();
+    return rect.width > 0 || rect.height > 0 || !!node.textContent?.trim();
+  }
+
   function conversationTimelineQuestions() {
     const root = conversationTimelineRoot();
     if (!root?.matches?.('.thread-scroll-container, main, [role="main"]')) return [];
@@ -2422,16 +2652,40 @@
       const target = node.closest('[data-testid="conversation-turn"]') || node;
       if (seen.has(target)) return [];
       seen.add(target);
+      if (!visibleTimelineNode(target)) return [];
       const text = extractTimelineQuestionText(node);
       if (!text) return [];
-      return [{ node: target, text }];
+      return [{ node: target, text, nodeId: timelineNodeId(target) }];
     });
   }
 
-  function timelineMarkerTop(question, questions) {
-    if (questions.length <= 1) return 50;
-    const index = questions.indexOf(question);
-    return Math.max(2, Math.min(98, (index / (questions.length - 1)) * 100));
+  function timelineScrollerViewportTop(scroller) {
+    if (scroller === document.scrollingElement || scroller === document.documentElement || scroller === document.body) return 0;
+    return scroller.getBoundingClientRect().top;
+  }
+
+  function timelineScrollableHeight(scroller) {
+    return Math.max(1, scroller.scrollHeight - scroller.clientHeight);
+  }
+
+  function timelineRawMarkerTop(question, scroller) {
+    const scrollOffset = scroller.scrollTop + question.node.getBoundingClientRect().top - timelineScrollerViewportTop(scroller);
+    const percent = (scrollOffset / timelineScrollableHeight(scroller)) * 100;
+    return Math.max(timelineMinTopPercent, Math.min(timelineMaxTopPercent, percent));
+  }
+
+  function timelineMarkerTops(questions, scroller) {
+    if (questions.length <= 1) return [50];
+    const minGap = Math.min(timelineMaxMarkerGapPercent, (timelineMaxTopPercent - timelineMinTopPercent) / Math.max(questions.length - 1, 1));
+    const tops = questions.map((question) => timelineRawMarkerTop(question, scroller));
+    for (let index = 1; index < tops.length; index += 1) {
+      tops[index] = Math.max(tops[index], tops[index - 1] + minGap);
+    }
+    for (let index = tops.length - 1; index >= 0; index -= 1) {
+      const maxForIndex = timelineMaxTopPercent - ((tops.length - 1 - index) * minGap);
+      tops[index] = Math.min(tops[index], maxForIndex);
+    }
+    return tops.map((top) => Math.max(timelineMinTopPercent, Math.min(timelineMaxTopPercent, top)));
   }
 
   function removeConversationTimeline() {
@@ -2448,9 +2702,8 @@
 
   function scrollTimelineTarget(node) {
     const scroller = nearestTimelineScroller(node);
-    const scrollerRect = scroller.getBoundingClientRect();
     const nodeRect = node.getBoundingClientRect();
-    const nextTop = scroller.scrollTop + nodeRect.top - scrollerRect.top - (scroller.clientHeight / 2) + (nodeRect.height / 2);
+    const nextTop = scroller.scrollTop + nodeRect.top - timelineScrollerViewportTop(scroller) - (scroller.clientHeight / 2) + (nodeRect.height / 2);
     scroller.scrollTo({ top: nextTop, behavior: "smooth" });
   }
 
@@ -2464,15 +2717,18 @@
     }, 1300);
   }
 
-  function createConversationTimelineMarker(question, questions) {
+  function createConversationTimelineMarker(question) {
     const marker = document.createElement("button");
     marker.type = "button";
     marker.className = timelineMarkerClass;
-    marker.style.top = `${timelineMarkerTop(question, questions)}%`;
-    marker.setAttribute("aria-label", truncateTimelineQuestion(question.text));
+    marker.style.top = `${question.markerTop}%`;
+    marker.setAttribute("aria-label", `跳转到：${truncateTimelineQuestion(question.text)}`);
     const tooltip = document.createElement("span");
     tooltip.className = timelineTooltipClass;
+    tooltip.id = `codex-conversation-timeline-tooltip-${question.nodeId}`;
+    tooltip.setAttribute("role", "tooltip");
     tooltip.textContent = truncateTimelineQuestion(question.text);
+    marker.setAttribute("aria-describedby", tooltip.id);
     marker.appendChild(tooltip);
     const activateMarker = (event) => {
       event.preventDefault();
@@ -2486,22 +2742,51 @@
       highlightTimelineTarget(question.node);
     };
     marker.addEventListener("pointerup", activateMarker, true);
+    marker.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" || event.key === " ") activateMarker(event);
+    }, true);
     return marker;
   }
 
+  function prepareTimelineQuestions(questions) {
+    if (questions.length === 0) return [];
+    const scroller = nearestTimelineScroller(questions[0].node);
+    const tops = timelineMarkerTops(questions, scroller);
+    return questions.map((question, index) => ({ ...question, markerTop: Number(tops[index].toFixed(3)) }));
+  }
+
+  function timelineSignature(questions) {
+    return questions.map((question) => `${question.nodeId}:${Math.round(question.markerTop * 10)}:${truncateTimelineQuestion(question.text)}`).join("|");
+  }
+
   function refreshConversationTimeline() {
+    if (!codexPlusSettings().conversationTimeline) {
+      removeConversationTimeline();
+      return;
+    }
+    const questions = prepareTimelineQuestions(conversationTimelineQuestions());
+    if (questions.length === 0) {
+      removeConversationTimeline();
+      return;
+    }
+    const signature = timelineSignature(questions);
+    const existing = document.querySelector(`.${timelineClass}`);
+    if (
+      existing?.dataset.codexConversationTimelineVersion === codexConversationTimelineVersion &&
+      existing?.dataset.codexConversationTimelineSignature === signature
+    ) {
+      return;
+    }
     removeConversationTimeline();
-    if (!codexPlusSettings().conversationTimeline) return;
-    const questions = conversationTimelineQuestions();
-    if (questions.length === 0) return;
     const container = document.createElement("div");
     container.className = timelineClass;
     container.dataset.codexConversationTimelineVersion = codexConversationTimelineVersion;
+    container.dataset.codexConversationTimelineSignature = signature;
     const track = document.createElement("div");
     track.className = timelineTrackClass;
     container.appendChild(track);
     questions.forEach((question) => {
-      container.appendChild(createConversationTimelineMarker(question, questions));
+      container.appendChild(createConversationTimelineMarker(question));
     });
     document.body.appendChild(container);
   }
@@ -2552,24 +2837,35 @@
     "[data-codex-archive-delete-all]",
     '[data-message-author-role]',
     '[data-testid="conversation-turn"]',
-    'main .prose',
+    '[class*="user-message"]',
+    '[class*="UserMessage"]',
     selectors.appHeader,
     selectors.archiveNav,
     selectors.disabledInstallButton,
   ].join(", ");
 
+  function nodeSelfOrAncestorMatchesScanRelevance(node) {
+    if (node.nodeType !== 1) return false;
+    if (isExtensionUiNode(node)) return false;
+    const questionSelector = timelineQuestionSelector();
+    return !!node.matches?.(scanRelevantSelector) ||
+      !!node.closest?.(scanRelevantSelector) ||
+      !!node.matches?.(questionSelector) ||
+      !!node.closest?.(questionSelector) ||
+      nodeOrAncestorLooksLikeCodexUserBubble(node);
+  }
+
   function isScanRelevantNode(node) {
     if (node.nodeType !== 1) return false;
     if (isExtensionUiNode(node)) return false;
-    return !!node.matches?.(scanRelevantSelector) || !!node.closest?.(scanRelevantSelector) || !!node.querySelector?.(scanRelevantSelector);
+    return nodeSelfOrAncestorMatchesScanRelevance(node) || !!node.querySelector?.(scanRelevantSelector) || nodeLooksLikeTimelineQuestion(node);
   }
 
   function isChatContentMutation(mutation) {
     const target = mutation.target;
-    if (target?.closest?.('[data-message-author-role], [data-testid="conversation-turn"], main .prose')) {
-      return false;
-    }
-    return false;
+    if (!target?.closest?.('[data-message-author-role], [data-testid="conversation-turn"], main .prose')) return false;
+    return !Array.from(mutation.addedNodes).some((node) => node.nodeType === 1 && isScanRelevantNode(node)) &&
+      !Array.from(mutation.removedNodes).some((node) => node.nodeType === 1 && isScanRelevantNode(node));
   }
 
   function shouldScheduleScan(mutations) {
@@ -2578,7 +2874,9 @@
       if (isChatContentMutation(mutation)) return false;
       const target = mutation.target;
       if (isExtensionUiNode(target)) return false;
-      return Array.from(mutation.addedNodes).some((node) => node.nodeType === 1 && !isExtensionUiNode(node)) || Array.from(mutation.removedNodes).some((node) => node.nodeType === 1);
+      if (target?.nodeType === 1 && nodeSelfOrAncestorMatchesScanRelevance(target)) return true;
+      const changedNodes = [...Array.from(mutation.addedNodes), ...Array.from(mutation.removedNodes)];
+      return changedNodes.some((node) => node.nodeType === 1 && isScanRelevantNode(node));
     });
   }
 
@@ -2605,9 +2903,10 @@
   let codexPlusResizeRafId = 0;
   window.__codexPlusResizeHandler = () => {
     cancelAnimationFrame(codexPlusResizeRafId);
-    codexPlusResizeRafId = requestAnimationFrame(() =>
-      updateFloatingCodexPlusMenuPosition(document.getElementById(codexPlusMenuId))
-    );
+    codexPlusResizeRafId = requestAnimationFrame(() => {
+      updateFloatingCodexPlusMenuPosition(document.getElementById(codexPlusMenuId));
+      runScanStep(refreshConversationTimeline);
+    });
   };
   window.addEventListener("resize", window.__codexPlusResizeHandler);
   window.__codexSessionDeleteObserver?.disconnect();
